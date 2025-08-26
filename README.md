@@ -11,7 +11,7 @@ notepad
 
 multitasking f1,f2,f3,escape etc...
 
-Simple PCIe scripting: PCIe_device >> DMA, int i = PCIe_device << hardware_variable
+simple PCIe scripting: PCIe_device >> DMA, int i = PCIe_device << hardware_variable & return template.
 
 
 
