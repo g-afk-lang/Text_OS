@@ -462,6 +462,9 @@ bool fat32_format(uint64_t ahci_base, int port, uint32_t total_sectors, uint8_t 
     simple_memcpy(sector, &bpb, sizeof(bpb));
     sector[510] = 0x55;
     sector[511] = 0xAA; // FIXED: Correct boot signature
+    
+    sector[510] = 0x00;
+    sector[511] = 0x00; // dud boot for testing
 
     cout << "Writing boot sector...\n";
     if (write_sectors(ahci_base, port, 0, 1, sector) != 0) return false;
@@ -602,5 +605,4 @@ extern "C" void kernel_main() {
     cout << "FAT32 Filesystem Support Ready.\n\n";
     command_prompt();
 }
-
 
