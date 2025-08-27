@@ -12,8 +12,7 @@
 #include "dma_memory.h"
 #include "identify.h"
 
-
-// Fix macro redefinition warning
+// --- MACROS AND CONSTANTS ---
 #undef MAX_COMMAND_LENGTH
 #define MAX_COMMAND_LENGTH 256
 #define SECTOR_SIZE 512
@@ -23,21 +22,58 @@
 #define ATTR_VOLUME_ID 0x08
 #define ATTR_ARCHIVE 0x20
 #define DELETED_ENTRY 0xE5
+static const uint32_t FAT_FREE_CLUSTER = 0x00000000;
+static const uint32_t FAT_END_OF_CHAIN = 0x0FFFFFFF;
+static const uint32_t FAT_BAD_CLUSTER  = 0x0FFFFFF7;
 
-// Forward declarations for inline functions
+
+// --- FORWARD DECLARATIONS ---
+// Utilities
 static inline void* simple_memcpy(void* dst, const void* src, size_t n);
 static inline void* simple_memset(void* s, int c, size_t n);
 static inline int simple_memcmp(const void* s1, const void* s2, size_t n);
 static inline int stricmp(const char* s1, const char* s2);
-// Add these forward declarations
-uint64_t parse_hex_input();
-size_t parse_decimal_input();
-// --- COPY/PASTE TO REPLACE YOUR EXISTING CODE ---
 
-// FIXED: Correct FAT32 Boot Parameter Block structure
+static inline char* simple_strchr(const char* s, int c);
+static inline char* simple_strcat(char* dest, const char* src);
+
+// FAT32 Helpers
+static void to_83_format(const char* filename, char* out);
+void from_83_format(const char* fat_name, char* out);
+static inline uint64_t cluster_to_lba(uint32_t cluster);
+uint32_t clusters_needed(uint32_t size);
+
+// Core FAT32 Functions
+bool fat32_init(uint64_t ahci_base, int port);
+uint32_t read_fat_entry(uint64_t ahci_base, int port, uint32_t cluster);
+bool write_fat_entry(uint64_t ahci_base, int port, uint32_t cluster, uint32_t value);
+uint32_t find_free_cluster(uint64_t ahci_base, int port, uint32_t start_cluster);
+uint32_t allocate_cluster(uint64_t ahci_base, int port);
+uint32_t allocate_cluster_chain(uint64_t ahci_base, int port, uint32_t num_clusters);
+void free_cluster_chain(uint64_t ahci_base, int port, uint32_t start_cluster);
+bool read_data_from_clusters(uint64_t ahci_base, int port, uint32_t start_cluster, void* data, uint32_t size);
+bool write_data_to_clusters(uint64_t ahci_base, int port, uint32_t start_cluster, const void* data, uint32_t size);
+
+// File Operations
+void fat32_list_files(uint64_t ahci_base, int port);
+void fat32_read_file(uint64_t ahci_base, int port, const char* filename);
+int fat32_add_file(uint64_t ahci_base, int port, const char* filename, const void* data, uint32_t size);
+int fat32_remove_file(uint64_t ahci_base, int port, const char* filename);
+int fat32_read_file_to_buffer(uint64_t ahci_base, int port, const char* filename, void* data_buffer, uint32_t buffer_size);
+int fat32_write_file(uint64_t ahci_base, int port, const char* filename, const void* data, uint32_t size);
+
+// Commands
+void cmd_help();
+void cmd_formatfs(uint64_t ahci_base, int port);
+void cmd_notepad(uint64_t ahci_base, int port, const char* filename);
+void fat32_show_filesystem_info();
+void show_cluster_stats(uint64_t ahci_base, int port);
+
+
+// --- DATA STRUCTURES ---
 typedef struct {
     uint8_t  jmp_boot[3];
-    char     oem_name[8];          // CORRECTED: Must be 8 bytes
+    char     oem_name[8];
     uint16_t bytes_per_sec;
     uint8_t  sec_per_clus;
     uint16_t rsvd_sec_cnt;
@@ -62,12 +98,9 @@ typedef struct {
     uint8_t  boot_sig;
     uint32_t vol_id;
     char     vol_lab[11];
-    char     fil_sys_type[8];      // CORRECTED: Must be 8 bytes
+    char     fil_sys_type[8];
 } __attribute__((packed)) fat32_bpb_t;
 
-
-
-// FAT32 directory entry structure
 typedef struct {
     char name[11];
     uint8_t attr;
@@ -83,20 +116,285 @@ typedef struct {
     uint32_t file_size;
 } __attribute__((packed)) fat_dir_entry_t;
 
-// Global FAT32 variables
+
+// --- GLOBAL VARIABLES ---
 static fat32_bpb_t fat32_bpb;
 static uint32_t fat_start_sector = 0;
 static uint32_t data_start_sector = 0;
 static uint32_t current_directory_cluster = 2;
+static uint32_t next_free_cluster = 3;
+uint64_t ahci_base;
+DMAManager dma_manager;
 
-// FAT32 cluster management additions
-static uint32_t next_free_cluster = 3; // Start searching from cluster 3
-static const uint32_t FAT_FREE_CLUSTER = 0x00000000;
-static const uint32_t FAT_END_OF_CHAIN = 0x0FFFFFFF;
-static const uint32_t FAT_BAD_CLUSTER = 0x0FFFFFF7;
+// --- UTILITY FUNCTION IMPLEMENTATIONS ---
+static inline void* simple_memcpy(void* dst, const void* src, size_t n) { char* d = (char*)dst; const char* s = (const char*)src; for (size_t i = 0; i < n; i++) d[i] = s[i]; return dst; }
+static inline void* simple_memset(void* s, int c, size_t n) { char* p = (char*)s; for (size_t i = 0; i < n; i++) p[i] = (char)c; return s; }
+static inline int simple_memcmp(const void* s1, const void* s2, size_t n) { const unsigned char* p1 = (const unsigned char*)s1; const unsigned char* p2 = (const unsigned char*)s2; for (size_t i = 0; i < n; i++) { if (p1[i] != p2[i]) return p1[i] - p2[i]; } return 0; }
 
+static inline char* simple_strchr(const char* s, int c) { while (*s != (char)c) if (!*s++) return nullptr; return (char*)s; }
+static inline char* simple_strcat(char* dest, const char* src) { char* ptr = dest + simple_strlen(dest); while (*src != '\0') *ptr++ = *src++; *ptr = '\0'; return dest; }
+static inline int stricmp(const char* s1, const char* s2) { while (*s1 && *s2) { char c1 = (*s1 >= 'A' && *s1 <= 'Z') ? *s1 + 32 : *s1; char c2 = (*s2 >= 'A' && *s2 <= 'Z') ? *s2 + 32 : *s2; if (c1 != c2) return c1 - c2; s1++; s2++; } return *s1 - *s2; }
 
-// --- NEW, ROBUST FAT32 FORMATTING FUNCTION ---
+// --- FAT32 HELPER IMPLEMENTATIONS ---
+static void to_83_format(const char* filename, char* out) { simple_memset(out, ' ', 11); uint8_t i = 0, j = 0; while (filename[i] && filename[i] != '.' && j < 8) { char c = filename[i++]; out[j++] = (c >= 'a' && c <= 'z') ? c - 32 : c; } if (filename[i] == '.') i++; j = 8; while (filename[i] && j < 11) { char c = filename[i++]; out[j++] = (c >= 'a' && c <= 'z') ? c - 32 : c; } }
+void from_83_format(const char* fat_name, char* out) { int i, j = 0; for (i = 0; i < 8 && fat_name[i] != ' '; i++) out[j++] = fat_name[i]; if (fat_name[8] != ' ') { out[j++] = '.'; for (i = 8; i < 11 && fat_name[i] != ' '; i++) out[j++] = fat_name[i]; } out[j] = '\0'; }
+static inline uint64_t cluster_to_lba(uint32_t cluster) { if (cluster < 2) return 0; return data_start_sector + ((uint64_t)(cluster - 2) * fat32_bpb.sec_per_clus); }
+uint32_t clusters_needed(uint32_t size) { uint32_t cluster_size = fat32_bpb.sec_per_clus * fat32_bpb.bytes_per_sec; return (size + cluster_size - 1) / cluster_size; }
+
+// --- CORE FAT32 FUNCTION IMPLEMENTATIONS ---
+
+bool fat32_init(uint64_t ahci_base, int port) {
+    uint8_t buffer[SECTOR_SIZE];
+    if (read_sectors(ahci_base, port, 0, (uint32_t)1, buffer) != 0) return false;
+    simple_memcpy(&fat32_bpb, buffer, sizeof(fat32_bpb_t));
+    if (simple_memcmp(fat32_bpb.fil_sys_type, "FAT32   ", 8) != 0) return false;
+    fat_start_sector = fat32_bpb.rsvd_sec_cnt;
+    data_start_sector = fat_start_sector + (fat32_bpb.num_fats * fat32_bpb.fat_sz32);
+    current_directory_cluster = fat32_bpb.root_clus;
+    return true;
+}
+
+uint32_t read_fat_entry(uint64_t ahci_base, int port, uint32_t cluster) {
+    if (cluster < 2) return FAT_BAD_CLUSTER;
+    uint32_t fat_offset = cluster * 4;
+    uint32_t fat_sector = fat_start_sector + (fat_offset / SECTOR_SIZE);
+    uint32_t entry_offset = fat_offset % SECTOR_SIZE;
+    uint8_t buffer[SECTOR_SIZE];
+    if (read_sectors(ahci_base, port, fat_sector, (uint32_t)1, buffer) != 0) return FAT_BAD_CLUSTER;
+    return (*(uint32_t*)(buffer + entry_offset)) & 0x0FFFFFFF;
+}
+
+bool write_fat_entry(uint64_t ahci_base, int port, uint32_t cluster, uint32_t value) {
+    if (cluster < 2) return false;
+    uint32_t fat_offset = cluster * 4;
+    uint32_t fat_sector_offset = fat_offset / SECTOR_SIZE;
+    uint32_t entry_offset = fat_offset % SECTOR_SIZE;
+    uint8_t buffer[SECTOR_SIZE];
+    if (read_sectors(ahci_base, port, fat_start_sector + fat_sector_offset, (uint32_t)1, buffer) != 0) return false;
+    uint32_t* fat_entry_ptr = (uint32_t*)(buffer + entry_offset);
+    *fat_entry_ptr = (*fat_entry_ptr & 0xF0000000) | (value & 0x0FFFFFFF);
+    for (uint8_t i = 0; i < fat32_bpb.num_fats; i++) {
+        uint32_t current_fat_sector = fat_start_sector + (i * fat32_bpb.fat_sz32) + fat_sector_offset;
+        if (write_sectors(ahci_base, port, current_fat_sector, (uint32_t)1, buffer) != 0) return false;
+    }
+    return true;
+}
+
+uint32_t find_free_cluster(uint64_t ahci_base, int port, uint32_t start_cluster) {
+    uint32_t max_clusters = (fat32_bpb.tot_sec32 - data_start_sector) / fat32_bpb.sec_per_clus + 2;
+    for (uint32_t cluster = start_cluster; cluster < max_clusters; cluster++) {
+        if (read_fat_entry(ahci_base, port, cluster) == FAT_FREE_CLUSTER) return cluster;
+    }
+    if (start_cluster > 2) {
+        for (uint32_t cluster = 2; cluster < start_cluster; cluster++) {
+            if (read_fat_entry(ahci_base, port, cluster) == FAT_FREE_CLUSTER) return cluster;
+        }
+    }
+    return 0; // No free clusters
+}
+
+uint32_t allocate_cluster(uint64_t ahci_base, int port) {
+    uint32_t cluster = find_free_cluster(ahci_base, port, next_free_cluster);
+    if (cluster == 0) { cout << "Disk full\n"; return 0; }
+    if (!write_fat_entry(ahci_base, port, cluster, FAT_END_OF_CHAIN)) { cout << "Failed to update FAT\n"; return 0; }
+    uint8_t zero_buffer[SECTOR_SIZE];
+    simple_memset(zero_buffer, 0, SECTOR_SIZE);
+    uint64_t cluster_lba = cluster_to_lba(cluster);
+    for (uint8_t s = 0; s < fat32_bpb.sec_per_clus; s++) {
+        if (write_sectors(ahci_base, port, cluster_lba + s, (uint32_t)1, zero_buffer) != 0) { cout << "Failed to clear cluster\n"; }
+    }
+    next_free_cluster = cluster + 1;
+    return cluster;
+}
+
+void free_cluster_chain(uint64_t ahci_base, int port, uint32_t start_cluster) {
+    uint32_t current_cluster = start_cluster;
+    while (current_cluster >= 2 && current_cluster < FAT_BAD_CLUSTER) {
+        uint32_t next = read_fat_entry(ahci_base, port, current_cluster);
+        if (!write_fat_entry(ahci_base, port, current_cluster, FAT_FREE_CLUSTER)) { cout << "Warning: Failed to free cluster " << current_cluster << "\n"; }
+        if (current_cluster < next_free_cluster) next_free_cluster = current_cluster;
+        current_cluster = next;
+    }
+}
+
+uint32_t allocate_cluster_chain(uint64_t ahci_base, int port, uint32_t num_clusters) {
+    if (num_clusters == 0) return 0;
+    uint32_t first_cluster = allocate_cluster(ahci_base, port);
+    if (first_cluster == 0) return 0;
+    uint32_t current_cluster = first_cluster;
+    for (uint32_t i = 1; i < num_clusters; i++) {
+        uint32_t next_cluster = allocate_cluster(ahci_base, port);
+        if (next_cluster == 0) { free_cluster_chain(ahci_base, port, first_cluster); return 0; }
+        if (!write_fat_entry(ahci_base, port, current_cluster, next_cluster)) { free_cluster_chain(ahci_base, port, first_cluster); return 0; }
+        current_cluster = next_cluster;
+    }
+    return first_cluster;
+}
+
+bool read_data_from_clusters(uint64_t ahci_base, int port, uint32_t start_cluster, void* data, uint32_t size) {
+    uint8_t* data_ptr = (uint8_t*)data;
+    uint32_t remaining = size;
+    uint32_t current_cluster = start_cluster;
+    uint32_t cluster_size = fat32_bpb.sec_per_clus * SECTOR_SIZE;
+    while (current_cluster >= 2 && current_cluster < FAT_BAD_CLUSTER && remaining > 0) {
+        uint64_t lba = cluster_to_lba(current_cluster);
+        uint32_t to_read = (remaining > cluster_size) ? cluster_size : remaining;
+        uint32_t full_sectors = to_read / SECTOR_SIZE;
+        if (full_sectors > 0) {
+            if (read_sectors(ahci_base, port, lba, full_sectors, data_ptr) != 0) return false;
+            data_ptr += full_sectors * SECTOR_SIZE;
+            remaining -= full_sectors * SECTOR_SIZE;
+        }
+        uint32_t partial_bytes = to_read % SECTOR_SIZE;
+        if (partial_bytes > 0) {
+            uint8_t sector_buffer[SECTOR_SIZE];
+            if (read_sectors(ahci_base, port, lba + full_sectors, (uint32_t)1, sector_buffer) != 0) return false;
+            simple_memcpy(data_ptr, sector_buffer, partial_bytes);
+            remaining -= partial_bytes;
+        }
+        current_cluster = read_fat_entry(ahci_base, port, current_cluster);
+    }
+    return remaining == 0;
+}
+
+bool write_data_to_clusters(uint64_t ahci_base, int port, uint32_t start_cluster, const void* data, uint32_t size) {
+    const uint8_t* data_ptr = (const uint8_t*)data;
+    uint32_t remaining = size;
+    uint32_t current_cluster = start_cluster;
+    uint32_t cluster_size = fat32_bpb.sec_per_clus * SECTOR_SIZE;
+    while (current_cluster >= 2 && current_cluster < FAT_BAD_CLUSTER && remaining > 0) {
+        uint64_t lba = cluster_to_lba(current_cluster);
+        uint32_t to_write = (remaining > cluster_size) ? cluster_size : remaining;
+        uint32_t full_sectors = to_write / SECTOR_SIZE;
+        if (full_sectors > 0) {
+            if (write_sectors(ahci_base, port, lba, full_sectors, (void*)data_ptr) != 0) return false;
+            data_ptr += full_sectors * SECTOR_SIZE;
+            remaining -= full_sectors * SECTOR_SIZE;
+        }
+        uint32_t partial_bytes = to_write % SECTOR_SIZE;
+        if (partial_bytes > 0) {
+            uint8_t sector_buffer[SECTOR_SIZE];
+            simple_memset(sector_buffer, 0, SECTOR_SIZE);
+            simple_memcpy(sector_buffer, data_ptr, partial_bytes);
+            if (write_sectors(ahci_base, port, lba + full_sectors, (uint32_t)1, sector_buffer) != 0) return false;
+            remaining -= partial_bytes;
+        }
+        current_cluster = read_fat_entry(ahci_base, port, current_cluster);
+    }
+    return remaining == 0;
+}
+
+// --- FILE OPERATION IMPLEMENTATIONS ---
+void fat32_list_files(uint64_t ahci_base, int port) {
+    uint8_t buffer[SECTOR_SIZE];
+    uint64_t lba = cluster_to_lba(current_directory_cluster);
+    cout << "Directory Listing:\nName          Size\n--------------------\n";
+    for (uint8_t s = 0; s < fat32_bpb.sec_per_clus; s++) {
+        if (read_sectors(ahci_base, port, lba + s, (uint32_t)1, buffer) != 0) { cout << "Error reading directory\n"; return; }
+        for (uint16_t e = 0; e < SECTOR_SIZE / ENTRY_SIZE; e++) {
+            fat_dir_entry_t *entry = (fat_dir_entry_t *)(buffer + e * ENTRY_SIZE);
+            if (entry->name[0] == 0x00) return; // End of directory
+            if (entry->name[0] == DELETED_ENTRY || (entry->attr & (ATTR_LONG_NAME | ATTR_VOLUME_ID))) continue;
+            char fname[13];
+            from_83_format(entry->name, fname);
+            cout << fname;
+            for (int i = simple_strlen(fname); i < 14; i++) cout << " ";
+            cout << entry->file_size << "\n";
+        }
+    }
+}
+
+int fat32_add_file(uint64_t ahci_base, int port, const char* filename, const void* data, uint32_t size) {
+    uint8_t buffer[SECTOR_SIZE];
+    uint64_t dir_lba = cluster_to_lba(current_directory_cluster);
+    char target_83[11];
+    to_83_format(filename, target_83);
+
+    uint32_t first_cluster = 0;
+    if (size > 0) {
+        uint32_t needed = clusters_needed(size);
+        first_cluster = allocate_cluster_chain(ahci_base, port, needed);
+        if (first_cluster == 0) return -6; // Disk full
+        if (!write_data_to_clusters(ahci_base, port, first_cluster, data, size)) {
+            free_cluster_chain(ahci_base, port, first_cluster);
+            return -7; // Write failed
+        }
+    }
+
+    for (uint8_t s = 0; s < fat32_bpb.sec_per_clus; s++) {
+        if (read_sectors(ahci_base, port, dir_lba + s, (uint32_t)1, buffer) != 0) { if (first_cluster) free_cluster_chain(ahci_base, port, first_cluster); return -1; }
+        for (uint16_t e = 0; e < SECTOR_SIZE / ENTRY_SIZE; e++) {
+            fat_dir_entry_t *entry = (fat_dir_entry_t *)(buffer + e * ENTRY_SIZE);
+            if (entry->name[0] == 0x00 || entry->name[0] == DELETED_ENTRY) {
+                simple_memcpy(entry->name, target_83, 11);
+                entry->attr = ATTR_ARCHIVE;
+                entry->file_size = size;
+                entry->fst_clus_lo = first_cluster & 0xFFFF;
+                entry->fst_clus_hi = (first_cluster >> 16) & 0xFFFF;
+                // Timestamps can be set here
+                if (write_sectors(ahci_base, port, dir_lba + s, (uint32_t)1, buffer) != 0) { if (first_cluster) free_cluster_chain(ahci_base, port, first_cluster); return -2; }
+                return 0; // Success
+            }
+        }
+    }
+    if (first_cluster) free_cluster_chain(ahci_base, port, first_cluster);
+    return -4; // No space in directory
+}
+
+int fat32_remove_file(uint64_t ahci_base, int port, const char* filename) {
+    uint8_t buffer[SECTOR_SIZE];
+    uint64_t lba = cluster_to_lba(current_directory_cluster);
+    char target[11];
+    to_83_format(filename, target);
+    for (uint8_t s = 0; s < fat32_bpb.sec_per_clus; s++) {
+        if (read_sectors(ahci_base, port, lba + s, (uint32_t)1, buffer) != 0) return -1;
+        for (uint16_t e = 0; e < SECTOR_SIZE / ENTRY_SIZE; e++) {
+            fat_dir_entry_t *entry = (fat_dir_entry_t *)(buffer + e * ENTRY_SIZE);
+            if (entry->name[0] == 0) return -4;
+            if (entry->name[0] == DELETED_ENTRY || (entry->attr & (ATTR_LONG_NAME | ATTR_VOLUME_ID))) continue;
+            if (simple_memcmp(entry->name, target, 11) == 0) {
+                uint32_t cluster = (entry->fst_clus_hi << 16) | entry->fst_clus_lo;
+                entry->name[0] = DELETED_ENTRY;
+                if (write_sectors(ahci_base, port, lba + s, (uint32_t)1, buffer) != 0) return -2;
+                if (cluster >= 2) free_cluster_chain(ahci_base, port, cluster);
+                return 0;
+            }
+        }
+    }
+    return -4;
+}
+
+int fat32_read_file_to_buffer(uint64_t ahci_base, int port, const char* filename, void* data_buffer, uint32_t buffer_size) {
+    uint8_t dir_sector_buffer[SECTOR_SIZE];
+    uint64_t lba = cluster_to_lba(current_directory_cluster);
+    char target[11];
+    to_83_format(filename, target);
+    for (uint8_t s = 0; s < fat32_bpb.sec_per_clus; s++) {
+        if (read_sectors(ahci_base, port, lba + s, (uint32_t)1, dir_sector_buffer) != 0) { return -1; }
+        for (uint16_t e = 0; e < SECTOR_SIZE / ENTRY_SIZE; e++) {
+            fat_dir_entry_t* entry = (fat_dir_entry_t*)(dir_sector_buffer + e * ENTRY_SIZE);
+            if (entry->name[0] == 0) return -2; // Not found
+            if (entry->name[0] == DELETED_ENTRY || (entry->attr & (ATTR_LONG_NAME | ATTR_DIRECTORY | ATTR_VOLUME_ID))) continue;
+            if (simple_memcmp(entry->name, target, 11) == 0) {
+                uint32_t cluster = (entry->fst_clus_hi << 16) | entry->fst_clus_lo;
+                uint32_t size = entry->file_size;
+                if (size == 0) { ((char*)data_buffer)[0] = '\0'; return 0; }
+                uint32_t read_size = (size < buffer_size) ? size : buffer_size - 1;
+                if (cluster >= 2 && read_data_from_clusters(ahci_base, port, cluster, data_buffer, read_size)) {
+                    ((char*)data_buffer)[read_size] = '\0';
+                    return read_size;
+                }
+                return -1; // Read error
+            }
+        }
+    }
+    return -2; // Not found
+}
+
+int fat32_write_file(uint64_t ahci_base, int port, const char* filename, const void* data, uint32_t size) {
+    fat32_remove_file(ahci_base, port, filename); // Ignore error if file doesn't exist
+    return fat32_add_file(ahci_base, port, filename, data, size);
+}
 
 bool fat32_format(uint64_t ahci_base, int port, uint32_t total_sectors, uint8_t sectors_per_cluster) {
     uint8_t sector[SECTOR_SIZE];
@@ -218,563 +516,91 @@ bool fat32_format(uint64_t ahci_base, int port, uint32_t total_sectors, uint8_t 
 }
 
 
-// --- NEW, INTELLIGENT FORMAT COMMAND ---
-
+// --- COMMAND IMPLEMENTATIONS ---
+void cmd_help() { cout << "--- KERNEL COMMANDS ---\n  help, clear, formatfs, mount, unmount, ls, rm, touch, create, notepad, fsinfo\n"; }
+bool fat32_format(uint64_t ahci_base, int port, uint32_t total_sectors, uint8_t sectors_per_cluster); // Defined above
 void cmd_formatfs(uint64_t ahci_base, int port) {
     cout << "=== FAT32 Format Utility ===\n";
-
-    // Use a larger, more realistic disk size for testing.
-    // Your previous 65536 sectors (32MB) is too small for FAT32 with large clusters.
     uint32_t total_sectors = 2097152; // 1GB
-    
-    cout << "Disk size is set to " << total_sectors << " sectors (" 
-         << ((uint32_t)total_sectors * 512) / (1024 * 1024) << " MB).\n";
-
-    // Automatically select a valid cluster size
     uint8_t sec_per_clus;
-    if (total_sectors >= 33554432) { sec_per_clus = 64; }       // >= 16GB
-    else if (total_sectors >= 16777216) { sec_per_clus = 32; }  // >= 8GB
-    else if (total_sectors >= 524288) { sec_per_clus = 16; }    // >= 256MB
-    else { sec_per_clus = 8; }                                  // < 256MB
+    if (total_sectors >= 33554432) sec_per_clus = 64; else if (total_sectors >= 16777216) sec_per_clus = 32;
+    else if (total_sectors >= 524288) sec_per_clus = 16; else sec_per_clus = 8;
+    cout << "Disk size: " << ((uint32_t)total_sectors * 512) / (1024 * 1024) << " MB. Cluster size: " << (int)sec_per_clus << " sectors.\n";
+    cout << "WARNING: This will erase all data! Continue? (y/N): ";
+    char confirm[10]; cin >> confirm;
+    if (confirm[0] != 'y' && confirm[0] != 'Y') { cout << "Format cancelled.\n"; return; }
+    if (fat32_format(ahci_base, port, total_sectors, sec_per_clus)) { cout << "\n=== Format Successful! ===\n"; }
+    else { cout << "\n=== Format Failed! ===\n"; }
+}
 
-    cout << "A cluster size of " << (int)sec_per_clus << " sectors (" 
-         << (sec_per_clus * 512) / 1024 << " KB) has been selected.\n";
-    cout << "WARNING: This will erase all data on the disk!\n";
-    cout << "Continue with format? (y/N): ";
-    
-    char confirm[10];
-    cin >> confirm;
-    if (confirm[0] != 'y' && confirm[0] != 'Y') {
-        cout << "Format cancelled.\n";
-        return;
+void cmd_notepad(uint64_t ahci_base, int port, const char* filename) {
+    if (!filename) { cout << "Usage: notepad <filename>\n"; return; }
+    const int buffer_size = 4096;
+    char* text_buffer = new char[buffer_size];
+    if (!text_buffer) { cout << "Error: Could not allocate memory.\n"; return; }
+    simple_memset(text_buffer, 0, buffer_size);
+    int bytes_read = fat32_read_file_to_buffer(ahci_base, port, filename, text_buffer, buffer_size);
+    if (bytes_read > 0) { cout << "--- File Content ---\n" << text_buffer << "--------------------\n"; }
+    else { cout << "File is new or empty.\n"; }
+    cout << "Enter text. Type '[quit]' on a new line to save and quit.\n";
+    char line_buffer[256];
+    size_t current_len = simple_strlen(text_buffer);
+    while (true) {
+        cout << "edit> "; cin >> line_buffer;
+        if (stricmp(line_buffer, "[quit]") == 0) break;
+        size_t line_len = simple_strlen(line_buffer);
+        if (current_len + line_len + 2 < buffer_size) {
+            simple_strcat(text_buffer, line_buffer); simple_strcat(text_buffer, "\n");
+            current_len += line_len + 1;
+        } else { cout << "Buffer full.\n"; break; }
     }
-    
-    cout << "\nStarting format...\n";
-    if (fat32_format(ahci_base, port, total_sectors, sec_per_clus)) {
-        cout << "\n=== Format Successful! ===\n";
-        cout << "Use 'mount' to mount the new filesystem.\n";
-    } else {
-        cout << "\n=== Format Failed! ===\n";
-        cout << "Check console for errors. The disk may be too small or parameters invalid.\n";
-    }
+    if (fat32_write_file(ahci_base, port, filename, text_buffer, simple_strlen(text_buffer)) == 0) { cout << "File saved.\n"; }
+    else { cout << "Error saving file.\n"; }
+    delete[] text_buffer;
 }
 
-// --- END OF REPLACEMENT CODE ---
-
-
-
-// Function to get actual disk size
-uint32_t get_disk_sector_count(uint64_t ahci_base, int port) {
-    // This should use your AHCI identify command to get actual disk size
-    // For now, using a reasonable default, but you should implement proper detection
-    uint32_t sectors = 2097152; // 1GB default (2M sectors * 512 bytes)
-    
-    cout << "Detected disk size: " << sectors << " sectors (" 
-         << (sectors * 512) / (1024 * 1024) << " MB)\n";
-    
-    return sectors;
-}
-
-
-static inline void* simple_memcpy(void* dst, const void* src, size_t n);
-static inline void* simple_memset(void* s, int c, size_t n);
-// FAT32 Boot Parameter Block structure
-
-
-
-
-
-static inline void* simple_memcpy(void* dst, const void* src, size_t n) {
-    char* d = (char*)dst;
-    const char* s = (const char*)src;
-    for (size_t i = 0; i < n; i++) d[i] = s[i];
-    return dst;
-}
-
-static inline void* simple_memset(void* s, int c, size_t n) {
-    char* p = (char*)s;
-    for (size_t i = 0; i < n; i++) p[i] = (char)c;
-    return s;
-}
-
-static inline int simple_memcmp(const void* s1, const void* s2, size_t n) {
-    const char* p1 = (const char*)s1;
-    const char* p2 = (const char*)s2;
-    for (size_t i = 0; i < n; i++) {
-        if (p1[i] != p2[i]) return p1[i] - p2[i];
-    }
-    return 0;
-}
-
-static inline int stricmp(const char* s1, const char* s2) {
-    while (*s1 && *s2) {
-        char c1 = (*s1 >= 'A' && *s1 <= 'Z') ? *s1 + 32 : *s1;
-        char c2 = (*s2 >= 'A' && *s2 <= 'Z') ? *s2 + 32 : *s2;
-        if (c1 != c2) return c1 - c2;
-        s1++; s2++;
-    }
-    return *s1 - *s2;
-}
-
-// Convert cluster to LBA
-static inline uint64_t cluster_to_lba(uint32_t cluster) {
-    if (cluster < 2) return 0;
-    return data_start_sector + ((cluster - 2) * fat32_bpb.sec_per_clus);
-}
-
-// Convert filename to 8.3 format
-static void to_83_format(const char *filename, char *out) {
-    simple_memset(out, ' ', 11);
-    uint8_t i = 0, j = 0;
-    while (filename[i] && filename[i] != '.' && j < 8) {
-        char c = filename[i++];
-        out[j++] = (c >= 'a' && c <= 'z') ? c - 32 : c;
-    }
-    if (filename[i] == '.') i++;
-    j = 8;
-    while (filename[i] && j < 11) {
-        char c = filename[i++];
-        out[j++] = (c >= 'a' && c <= 'z') ? c - 32 : c;
-    }
-}
-
-// Extract filename from 8.3 format to readable string
-void from_83_format(const char* fat_name, char* out) {
-    int i, j = 0;
-    
-    // Copy name part, remove trailing spaces
-    for (i = 0; i < 8 && fat_name[i] != ' '; i++) {
-        out[j++] = fat_name[i];
-    }
-    
-    // Add extension if present
-    if (fat_name[8] != ' ') {
-        out[j++] = '.';
-        for (i = 8; i < 11 && fat_name[i] != ' '; i++) {
-            out[j++] = fat_name[i];
-        }
-    }
-    
-    out[j] = '\0';
-}
-
-// Initialize FAT32 filesystem
-bool fat32_init(uint64_t ahci_base, int port) {
-    uint8_t buffer[SECTOR_SIZE];
-    if (read_sectors(ahci_base, port, 0, 1, buffer) != 0) return false;
-    
-    simple_memcpy(&fat32_bpb, buffer, sizeof(fat32_bpb_t));
-    if (simple_memcmp(fat32_bpb.fil_sys_type, "FAT32   ", 8) != 0) return false;
-    
-    fat_start_sector = fat32_bpb.rsvd_sec_cnt;
-    data_start_sector = fat_start_sector + (fat32_bpb.num_fats * fat32_bpb.fat_sz32);
-    current_directory_cluster = fat32_bpb.root_clus;
-    return true;
-}
-
-
-// Global variables declarations
-char buffer[4096];
-size_t buffer_size = sizeof(buffer);
-uint64_t ahci_base;
-DMAManager dma_manager;
-
-// Stub functions for missing test programs
-void test_program_1() { cout << "Test program 1 executed\n"; }
-void test_program_2() { cout << "Test program 2 executed\n"; }
-
-// Command implementations
-void cmd_help() {
-    cout << "KERNEL COMMAND REFERENCE\n";
-    cout << "SYSTEM INFORMATION:\n";
-    cout << "  help                     show this help message\n";
-    cout << "  clear                    clear the screen\n";
-    cout << "  cpu                      display CPU information\n";
-    cout << "  memory                   display memory configuration\n";
-    cout << "  cache                    display cache information\n";
-    cout << "  topology                 display CPU topology\n";
-    cout << "  features                 display CPU features\n";
-    cout << "  pstates                  display P-States information\n";
-    cout << "  full                     display all hardware information\n";
-    cout << "  pciscan                  scan PCI devices\n";
-    cout << "  dma                      interactive DMA menu\n";
-    cout << "  dmadump                  quick memory dump\n";
-    cout << "  fshelp                   filesystem help\n";
- }
-
-// Helper function to parse hex input
-uint64_t parse_hex_input() {
-    char hex_str[20];
-    cin >> hex_str;
-    
-    uint64_t result = 0;
-    for (int i = 0; hex_str[i] != '\0'; i++) {
-        char c = hex_str[i];
-        result = result << 4;
-        
-        if (c >= '0' && c <= '9') {
-            result |= (c - '0');
-        } else if (c >= 'a' && c <= 'f') {
-            result |= (c - 'a' + 10);
-        } else if (c >= 'A' && c <= 'F') {
-            result |= (c - 'A' + 10);
-        }
-    }
-    return result;
-}
-
-// Helper function to parse decimal input
-size_t parse_decimal_input() {
-    char dec_str[20];
-    cin >> dec_str;
-    
-    size_t result = 0;
-    for (int i = 0; dec_str[i] != '\0'; i++) {
-        if (dec_str[i] >= '0' && dec_str[i] <= '9') {
-            result = result * 10 + (dec_str[i] - '0');
-        }
-    }
-    return result;
-}
-
-// Complete DMA test function
-void cmd_dma_test() {
-    cout << "=== DMA Memory Editor ===\n";
-    cout << "1. Read Memory Block\n";
-    cout << "2. Write Memory Block\n";
-    cout << "3. Memory Dump\n";
-    cout << "4. Pattern Fill\n";
-    cout << "5. Memory Copy\n";
-    cout << "6. DMA Channel Status\n";
-    cout << "7. Performance Test\n";
-    cout << "Enter choice: ";
-    
-    char choice[10];
-    cin >> choice;
-    
-    switch(int(choice)) {
-        case '1': {
-            cout << "=== DMA Read Memory Block ===\n";
-            cout << "Enter source address (hex): 0x";
-            uint64_t addr = parse_hex_input();
-            
-            cout << "Enter size (bytes): ";
-            size_t size = parse_decimal_input();
-            
-            if (size > 4096) {
-                cout << "Size too large (max 4096 bytes)\n";
-                break;
-            }
-            
-            void* buffer = dma_manager.allocate_dma_buffer(size);
-            if (!buffer) {
-                cout << "Failed to allocate DMA buffer\n";
-                break;
-            }
-            
-            cout << "Starting DMA read from 0x";
-            // Print hex address manually
-            char hex_output[17];
-            uint64_t temp_addr = addr;
-            int pos = 15;
-            hex_output[16] = '\0';
-            
-            do {
-                int digit = temp_addr & 0xF;
-                hex_output[pos--] = (digit < 10) ? ('0' + digit) : ('A' + digit - 10);
-                temp_addr >>= 4;
-            } while (temp_addr > 0 && pos >= 0);
-            
-            while (pos >= 0) {
-                hex_output[pos--] = '0';
-            }
-            cout << hex_output << "...\n";
-            
-            if (dma_manager.read_memory_dma(addr, buffer, size)) {
-                cout << "DMA read successful!\n";
-                cout << "Data contents (first 64 bytes):\n";
-                
-                uint8_t* data = (uint8_t*)buffer;
-                size_t display_size = (size > 64) ? 64 : size;
-                
-                for (size_t i = 0; i < display_size; i += 16) {
-                    cout << "  ";
-                    for (size_t j = 0; j < 16 && (i + j) < display_size; j++) {
-                        uint8_t byte = data[i + j];
-                        char hex_byte[3];
-
-
-                        hex_byte[0] = ((byte >> 4) < 10) ? ('0' + (byte >> 4)) : ('A' + (byte >> 4) - 10);
-                        hex_byte[1] = ((byte & 0xF) < 10) ? ('0' + (byte & 0xF)) : ('A' + (byte & 0xF) - 10);
-                        hex_byte[2] = '\0';
-                        cout << hex_byte << " ";
-                    }
-                    cout << "\n";
-                }
-            } else {
-                cout << "DMA read failed\n";
-            }
-            
-            dma_manager.free_dma_buffer(buffer);
-            break;
-        }
-        
-        case '2': {
-            cout << "=== DMA Write Memory Block ===\n";
-            cout << "Enter destination address (hex): 0x";
-            uint64_t addr = parse_hex_input();
-            
-            cout << "Enter data pattern (hex byte): 0x";
-            uint64_t pattern = parse_hex_input();
-            uint8_t byte_pattern = (uint8_t)(pattern & 0xFF);
-            
-            cout << "Enter size (bytes): ";
-            size_t size = parse_decimal_input();
-            
-            if (size > 4096) {
-                cout << "Size too large (max 4096 bytes)\n";
-                break;
-            }
-            
-            void* buffer = dma_manager.allocate_dma_buffer(size);
-            if (!buffer) {
-                cout << "Failed to allocate DMA buffer\n";
-                break;
-            }
-            
-            // Fill buffer with pattern
-            uint8_t* data = (uint8_t*)buffer;
-            for (size_t i = 0; i < size; i++) {
-                data[i] = byte_pattern;
-            }
-            
-            cout << "Writing pattern 0x";
-            char hex_byte[3];
-            hex_byte[0] = (byte_pattern >> 4) < 10 ? ('0' + (byte_pattern >> 4)) : ('A' + (byte_pattern >> 4) - 10);
-            hex_byte[1] = (byte_pattern & 0xF) < 10 ? ('0' + (byte_pattern & 0xF)) : ('A' + (byte_pattern & 0xF) - 10);
-            hex_byte[2] = '\0';
-            cout << hex_byte << " to memory...\n";
-            
-            if (dma_manager.write_memory_dma(addr, buffer, size)) {
-                cout << "DMA write successful!\n";
-            } else {
-                cout << "DMA write failed\n";
-            }
-            
-            dma_manager.free_dma_buffer(buffer);
-            break;
-        }
-        
-        case '3': {
-            cout << "=== DMA Memory Dump ===\n";
-            cout << "Enter start address (hex): 0x";
-            uint64_t addr = parse_hex_input();
-            
-            cout << "Enter dump size (bytes): ";
-            size_t size = parse_decimal_input();
-            
-            if (size > 2048) {
-                cout << "Size too large for display (max 2048 bytes)\n";
-                break;
-            }
-            
-            dma_manager.dump_memory_region(addr, size);
-            break;
-        }
-        
-        case '4': {
-            cout << "=== DMA Pattern Fill ===\n";
-            cout << "Enter destination address (hex): 0x";
-            uint64_t addr = parse_hex_input();
-            
-            cout << "Enter pattern (hex byte): 0x";
-            uint64_t pattern = parse_hex_input();
-            uint8_t byte_pattern = (uint8_t)(pattern & 0xFF);
-            
-            cout << "Enter size (bytes): ";
-            size_t size = parse_decimal_input();
-            
-            if (dma_manager.pattern_fill(addr, byte_pattern, size)) {
-                cout << "Pattern fill completed successfully\n";
-            } else {
-                cout << "Pattern fill failed\n";
-            }
-            break;
-        }
-        
-        case '5': {
-            cout << "=== DMA Memory Copy ===\n";
-            cout << "Enter source address (hex): 0x";
-            uint64_t src_addr = parse_hex_input();
-            
-            cout << "Enter destination address (hex): 0x";
-            uint64_t dst_addr = parse_hex_input();
-            
-            cout << "Enter size (bytes): ";
-            size_t size = parse_decimal_input();
-            
-            cout << "Copying " << (int)size << " bytes via DMA...\n";
-            
-            if (dma_manager.memory_copy(src_addr, dst_addr, size)) {
-                cout << "Memory copy completed successfully\n";
-            } else {
-                cout << "Memory copy failed\n";
-            }
-            break;
-        }
-        
-        case '6': {
-            cout << "=== DMA Channel Status ===\n";
-            dma_manager.show_channel_status();
-            break;
-        }
-        
-        case '7': {
-            cout << "=== DMA Performance Test ===\n";
-            cout << "Running DMA performance benchmark...\n";
-            
-            const size_t test_size = 1024;
-            uint64_t test_addr = 0x100000;  // 1MB mark
-            
-            void* src_buffer = dma_manager.allocate_dma_buffer(test_size);
-            void* dst_buffer = dma_manager.allocate_dma_buffer(test_size);
-            
-            if (src_buffer && dst_buffer) {
-                // Fill source with test data
-                uint8_t* src_data = (uint8_t*)src_buffer;
-                for (size_t i = 0; i < test_size; i++) {
-                    src_data[i] = (uint8_t)(i & 0xFF);
-                }
-                
-                cout << "Testing DMA read performance...\n";
-                if (dma_manager.read_memory_dma(test_addr, dst_buffer, test_size)) {
-                    cout << "Read test completed\n";
-                }
-                
-                cout << "Testing DMA write performance...\n";
-                if (dma_manager.write_memory_dma(test_addr, src_buffer, test_size)) {
-                    cout << "Write test completed\n";
-                }
-                
-                cout << "Testing memory-to-memory copy...\n";
-                if (dma_manager.memory_copy(test_addr, test_addr + test_size, test_size)) {
-                    cout << "Copy test completed\n";
-                }
-                
-                cout << "Performance test completed successfully\n";
-            } else {
-                cout << "Failed to allocate test buffers\n";
-            }
-            
-            if (src_buffer) dma_manager.free_dma_buffer(src_buffer);
-            if (dst_buffer) dma_manager.free_dma_buffer(dst_buffer);
-            break;
-        }
-        
-        default:
-            cout << "Invalid choice\n";
-            break;
-    }
-}
-
-// Command processing function
+// --- COMMAND PROMPT ---
 void command_prompt() {
     char input[MAX_COMMAND_LENGTH + 1];
-    ahci_base = disk_init();
-
-    int port = 0;
-    bool fat32_initialized = false;
-    
-    cout << "Kernel Command Prompt Ready\n";
-    cout << "Type 'help' for available commands\n\n";
-    
+    ahci_base = disk_init(); int port = 0; bool fat32_initialized = false;
+    cout << "Kernel Command Prompt. Type 'help' for commands.\n\n";
     while (true) {
-        cout << "> ";
+        cout << "> "; cin >> input;
+        char* space = simple_strchr(input, ' ');
+        char* args = nullptr;
+        if (space) { *space = '\0'; args = space + 1; }
+        char* cmd = input;
 
-        // Safely read input and null-terminate
-        cin >> input;
-        input[MAX_COMMAND_LENGTH] = '\0';
-
-        // Parse command and arguments
-        char* space = strchr(input, ' ');
-        size_t cmd_len = space ? space - input : simple_strlen(input);
-        char* args = space ? space + 1 : nullptr;
-        
-        // Create null-terminated command string
-        char cmd_str[MAX_COMMAND_LENGTH + 1];
-        simple_memcpy(cmd_str, input, cmd_len);
-        cmd_str[cmd_len] = '\0';
-        
-        // SYSTEM INFORMATION COMMANDS
-        if (stricmp(cmd_str, "help") == 0) {
-            cmd_help();
-        } else if (stricmp(cmd_str, "clear") == 0) {
-            clear_screen();
-        }else if (stricmp(cmd_str, "format") == 0) {
-            cmd_formatfs(ahci_base, 0);
-        } else if (stricmp(cmd_str, "cpu") == 0) {
-            cmd_cpu();
-        } else if (stricmp(cmd_str, "memory") == 0) {
-            cmd_memory();
-        } else if (stricmp(cmd_str, "cache") == 0) {
-            cmd_cache();
-        } else if (stricmp(cmd_str, "topology") == 0) {
-            cmd_topology();
-        } else if (stricmp(cmd_str, "features") == 0) {
-            cmd_features();
-        } else if (stricmp(cmd_str, "pstates") == 0) {
-            cmd_pstates();
-        } else if (stricmp(cmd_str, "full") == 0) {
-            cmd_full();
-        } else if (stricmp(cmd_str, "pciscan") == 0) {
-            cout << "PCI scan not implemented yet\n";
-        } else if (stricmp(cmd_str, "dma") == 0) {
-            cmd_dma_test();
-        } else if (stricmp(cmd_str, "dmadump") == 0) {
-            cout << "Enter address: 0x";
-            uint64_t addr = parse_hex_input();
-            dma_manager.dump_memory_region(addr, 256);
-            
-        // TEST PROGRAMS
-        } else if (stricmp(cmd_str, "program1") == 0) {
-            test_program_1();
-        } else if (stricmp(cmd_str, "program2") == 0) {
-            test_program_2();
-        } else if (stricmp(cmd_str, "mount") == 0) {
-
-            fat32_initialized = true;
-            cout << "FAT32 filesystem mounted successfully.\n";
-
-        } else if (stricmp(cmd_str, "unmount") == 0) {
-            fat32_initialized = false;
-            cout << "FAT32 filesystem unmounted.\n";
-        } else {
-            cout << "Unknown command: " << input << "\n";
-            cout << "Type 'help' for a list of commands.\n";
-
+        if (stricmp(cmd, "help") == 0) cmd_help();
+        else if (stricmp(cmd, "clear") == 0) clear_screen();
+        else if (stricmp(cmd, "formatfs") == 0) cmd_formatfs(ahci_base, port);
+        else if (stricmp(cmd, "mount") == 0) {
+            if (fat32_init(ahci_base, port)) { fat32_initialized = true; cout << "FAT32 mounted.\n"; }
+            else { cout << "Failed to mount. Is disk formatted?\n"; }
+        }
+        else if (stricmp(cmd, "unmount") == 0) { fat32_initialized = false; cout << "Filesystem unmounted.\n"; }
+        else {
+            if (!fat32_initialized) {
+                 cout << "Filesystem not mounted. Use 'mount' first.\n";
+            } else {
+                if (stricmp(cmd, "ls") == 0) fat32_list_files(ahci_base, port);
+                else if (stricmp(cmd, "rm") == 0) { if(args) fat32_remove_file(ahci_base, port, args); else cout << "Usage: rm <filename>\n"; }
+                else if (stricmp(cmd, "touch") == 0) { if(args) fat32_add_file(ahci_base, port, args, "", 0); else cout << "Usage: touch <filename>\n"; }
+                else if (stricmp(cmd, "notepad") == 0) cmd_notepad(ahci_base, port, args);
+                else if (stricmp(cmd, "") != 0) { cout << "Unknown command: '" << cmd << "'\n"; }
+            }
         }
     }
 }
 
-// Update kernel_main() to initialize new systems:
+// --- KERNEL ENTRY POINT ---
 extern "C" void kernel_main() {
-    terminal_initialize();
-    init_terminal_io();
-    init_keyboard();
-    
-    cout << "Hello, kernel World!" << '\n';
-    
-    // Initialize DMA system
-    uint64_t dma_base = 0xFED00000; // Example DMA controller base address
-    if (dma_manager.initialize(dma_base)) {
-        cout << "DMA Manager initialized successfully\n";
-    }
-    
-    cout << "Kernel initialized successfully!\n";
-    cout << "FAT32 Filesystem Support Ready\n";
-    cout << "\nBoot complete. Starting command prompt...\n";
-    cout << "Use 'mount' to initialize FAT32 filesystem\n";
-    
+    terminal_initialize(); init_terminal_io(); init_keyboard();
+    cout << "Kernel Initialized.\n";
+    uint64_t dma_base = 0xFED00000;
+    if (dma_manager.initialize(dma_base)) { cout << "DMA Manager Initialized.\n"; }
+    cout << "FAT32 Filesystem Support Ready.\n\n";
     command_prompt();
 }
+
 
