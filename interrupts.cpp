@@ -1,6 +1,7 @@
 #include "interrupts.h"
 #include "terminal_hooks.h"
 #include "iostream_wrapper.h"
+#include "test.h"
 
 // IDT and GDT structures
 struct idt_entry idt[256];
@@ -49,7 +50,6 @@ const char extended_scancode_table[128] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
-/* Keyboard interrupt handler */
 extern "C" void keyboard_handler() {
     /* Read scancode from keyboard data port */
     uint8_t scancode = inb(0x60);
@@ -61,12 +61,20 @@ extern "C" void keyboard_handler() {
         return;
     }
 
+    // Handle F5 key press to start Pong (check scancode directly)
+    if (scancode == SCANCODE_F5_PRESS) {
+        start_pong_game();
+        outb(0x20, 0x20);
+        return;
+    }
+
     // Handle Shift key press and release
     if (scancode == SCANCODE_L_SHIFT_PRESS || scancode == SCANCODE_R_SHIFT_PRESS) {
         shift_pressed = true;
         outb(0x20, 0x20); // Send EOI
         return;
     }
+
     if (scancode == SCANCODE_L_SHIFT_RELEASE || scancode == SCANCODE_R_SHIFT_RELEASE) {
         shift_pressed = false;
         outb(0x20, 0x20); // Send EOI
@@ -82,13 +90,25 @@ extern "C" void keyboard_handler() {
 
     // Handle special keys for extended keyboard sequences
     if (extended_key) {
-        switch (scancode) {
-            case SCANCODE_UP:
-                // cin.navigateHistory(true);
-                break;
-            case SCANCODE_DOWN:
-                // cin.navigateHistory(false);
-                break;
+        // If Pong is running, handle extended keys for game
+        if (is_pong_running()) {
+            switch (scancode) {
+                case SCANCODE_UP:
+                    pong_handle_input('w'); // Map up arrow to W
+                    break;
+                case SCANCODE_DOWN:
+                    pong_handle_input('s'); // Map down arrow to S
+                    break;
+            }
+        } else {
+            switch (scancode) {
+                case SCANCODE_UP:
+                    // cin.navigateHistory(true);
+                    break;
+                case SCANCODE_DOWN:
+                    // cin.navigateHistory(false);
+                    break;
+            }
         }
         extended_key = false;
         outb(0x20, 0x20); // Send EOI
@@ -99,21 +119,32 @@ extern "C" void keyboard_handler() {
     // Choose the correct scancode table based on whether Shift is pressed
     const char* current_scancode_table = shift_pressed ? scancode_to_ascii_shifted : scancode_to_ascii;
     char key = current_scancode_table[scancode];
-    
+
+    // Handle ESC key (scancode 0x01) manually since it's not in your ASCII table
+    if (scancode == 0x01) {
+        key = 27; // ESC ASCII code
+    }
+
     if (key != 0) {
-        if (key == '\n') {
-            terminal_putchar(key);
-            input_buffer[input_length] = '\0';
-            cin.setInputReady(input_buffer);
-            input_length = 0;
-        } else if (key == '\b') {
-            if (input_length > 0) {
+        // If Pong is running, send all input to the game
+        if (is_pong_running()) {
+            pong_handle_input(key);
+        } else {
+            // Normal terminal input handling
+            if (key == '\n') {
                 terminal_putchar(key);
-                input_length--;
+                input_buffer[input_length] = '\0';
+                cin.setInputReady(input_buffer);
+                input_length = 0;
+            } else if (key == '\b') {
+                if (input_length > 0) {
+                    terminal_putchar(key);
+                    input_length--;
+                }
+            } else if (input_length < MAX_COMMAND_LENGTH - 1) {
+                input_buffer[input_length++] = key;
+                terminal_putchar(key);
             }
-        } else if (input_length < MAX_COMMAND_LENGTH - 1) {
-            input_buffer[input_length++] = key;
-            terminal_putchar(key);
         }
     }
 
@@ -121,10 +152,17 @@ extern "C" void keyboard_handler() {
     outb(0x20, 0x20);
 }
 
+
 /* Timer interrupt handler */
 extern "C" void timer_handler() {
-    // Blink cursor
-    update_cursor_state();
+    // Update Pong game if it's running
+    if (is_pong_running()) {
+        pong_update();
+    } else {
+        // Only blink cursor when not in game
+        update_cursor_state();
+    }
+    
     // Send EOI to PIC
     outb(0x20, 0x20);
 }

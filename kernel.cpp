@@ -773,7 +773,7 @@ void cmd_notepad(uint64_t ahci_base, int port, const char* filename) {
     delete[] text_buffer;
 }
 // --- COMMAND IMPLEMENTATIONS ---
-void cmd_help() { cout << "--- KERNEL COMMANDS ---\n  help, clear, ls, rm, touch, notepad\n  cp <src> <dest>, mv <old> <new>\n  formatfs, mount, unmount, fsinfo, chkdsk\n"; }
+void cmd_help() { cout << "--- KERNEL COMMANDS ---\n  help, clear, pong, ls, rm, touch, notepad\n  cp <src> <dest>, mv <old> <new>\n  formatfs, mount, unmount, fsinfo, chkdsk\n"; }
 
 
 // --- COMMAND PROMPT (Rewritten for better argument parsing) ---
@@ -836,6 +836,9 @@ void command_prompt() {
                 else if (stricmp(cmd, "rm") == 0) { 
                     if(arg1) fat32_remove_file(ahci_base, port, arg1); 
                     else cout << "Usage: rm <filename>\n"; 
+                }
+                else if (stricmp(cmd, "pong") == 0) {
+                  start_pong_game();
                 }
                 else if (stricmp(cmd, "chkdsk") == 0) {
                   cmd_chkdsk(ahci_base, port);
