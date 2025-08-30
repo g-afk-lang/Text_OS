@@ -10,7 +10,6 @@
 #define MAX_LINE_LENGTH 79
 #define NOTEPAD_START_ROW 3
 #define NOTEPAD_END_ROW (NOTEPAD_START_ROW + MAX_VISIBLE_LINES - 1)
-#define TEXT_AREA_WIDTH 75  // Available width for text (80 - line number area)
 
 // --- NOTEPAD STATE ---
 static bool notepad_running = false;
@@ -24,9 +23,6 @@ static char current_filename[32] = "";
 // Scrolling state
 static int scroll_offset = 0;
 static int visible_lines = MAX_VISIBLE_LINES;
-
-// Text wrapping state
-static bool word_wrap_enabled = true;
 
 // --- MISSING FORWARD DECLARATIONS ---
 extern bool extended_key;
@@ -125,78 +121,6 @@ static void int_to_string(int num, char* str) {
     }
 }
 
-// --- TEXT WRAPPING FUNCTIONS ---
-static bool is_word_boundary(char c) {
-    return (c == ' ' || c == '\t' || c == '\n' || c == '\0');
-}
-
-static int find_wrap_position(const char* line, int max_width) {
-    if (simple_strlen(line) <= max_width) {
-        return simple_strlen(line);
-    }
-    
-    // Try to find a word boundary within the line
-    for (int i = max_width; i > 0; i--) {
-        if (is_word_boundary(line[i])) {
-            return i;
-        }
-    }
-    
-    // No word boundary found, force wrap at max_width
-    return max_width;
-}
-
-static void wrap_line_if_needed() {
-    if (!word_wrap_enabled) return;
-    
-    char* current_line = notepad_buffer[cursor_row];
-    int line_len = simple_strlen(current_line);
-    
-    if (line_len > TEXT_AREA_WIDTH && current_line_count < MAX_LINES) {
-        // Find the best wrap position
-        int wrap_pos = find_wrap_position(current_line, TEXT_AREA_WIDTH);
-        
-        // Skip leading spaces on the wrapped part
-        int next_start = wrap_pos;
-        while (current_line[next_start] == ' ' && next_start < line_len) {
-            next_start++;
-        }
-        
-        // Create the wrapped line
-        char wrapped_text[MAX_LINE_LENGTH + 1];
-        simple_strcpy(wrapped_text, &current_line[next_start]);
-        
-        // Truncate current line
-        current_line[wrap_pos] = '\0';
-        
-        // Shift all lines down to make room
-        for (int i = MAX_LINES - 1; i > cursor_row + 1; i--) {
-            simple_strcpy(notepad_buffer[i], notepad_buffer[i - 1]);
-        }
-        
-        // Insert wrapped text as new line
-        simple_strcpy(notepad_buffer[cursor_row + 1], wrapped_text);
-        current_line_count++;
-        
-        // Adjust cursor position if it was beyond the wrap point
-        if (cursor_col > wrap_pos) {
-            cursor_row++;
-            cursor_col = cursor_col - next_start;
-        }
-        
-        // Recursively wrap the new line if it's still too long
-        if (simple_strlen(wrapped_text) > TEXT_AREA_WIDTH) {
-            int old_row = cursor_row;
-            int old_col = cursor_col;
-            cursor_row++;
-            cursor_col = simple_strlen(wrapped_text);
-            wrap_line_if_needed();
-            cursor_row = old_row;
-            cursor_col = old_col;
-        }
-    }
-}
-
 // --- SCROLLING FUNCTIONS ---
 void notepad_scroll_up() {
     if (scroll_offset > 0) {
@@ -258,7 +182,7 @@ void notepad_draw_interface() {
         notepad_write_string_at(0, 16, "New File", 0x0F);
     }
     
-    // Show scroll position and wrap status
+    // Show scroll position indicator
     if (current_line_count > visible_lines) {
         char scroll_info[32];
         simple_strcpy(scroll_info, " Lines: ");
@@ -271,18 +195,11 @@ void notepad_draw_interface() {
         simple_strcat(scroll_info, "/");
         int_to_string(current_line_count, line_num);
         simple_strcat(scroll_info, line_num);
-        notepad_write_string_at(0, 45, scroll_info, 0x0F);
-    }
-    
-    // Show wrap status
-    if (word_wrap_enabled) {
-        notepad_write_string_at(0, 70, "[WRAP ON]", 0x0A);
-    } else {
-        notepad_write_string_at(0, 70, "[WRAP OFF]", 0x0C);
+        notepad_write_string_at(0, 50, scroll_info, 0x0F);
     }
     
     // Draw help line
-    notepad_write_string_at(1, 0, "ESC:Save | Arrows:Move | PgUp/Dn:Scroll | F2:Toggle Wrap", 0x07);
+    notepad_write_string_at(1, 0, "ESC: Save & Exit | Arrows: Move | PgUp/PgDn: Scroll | Type to edit", 0x07);
     
     // Draw separator
     for (int i = 0; i < 80; i++) {
@@ -309,18 +226,8 @@ void notepad_draw_interface() {
             }
             notepad_write_char_at(NOTEPAD_START_ROW + i, 3, '|', 0x08);
             
-            // Content - truncate if word wrap is off and line is too long
-            if (!word_wrap_enabled && simple_strlen(notepad_buffer[buffer_line]) > TEXT_AREA_WIDTH) {
-                char truncated_line[TEXT_AREA_WIDTH + 1];
-                for (int j = 0; j < TEXT_AREA_WIDTH; j++) {
-                    truncated_line[j] = notepad_buffer[buffer_line][j];
-                }
-                truncated_line[TEXT_AREA_WIDTH] = '\0';
-                notepad_write_string_at(NOTEPAD_START_ROW + i, 4, truncated_line, 0x07);
-                notepad_write_char_at(NOTEPAD_START_ROW + i, 79, '>', 0x0C); // Indicate truncation
-            } else {
-                notepad_write_string_at(NOTEPAD_START_ROW + i, 4, notepad_buffer[buffer_line], 0x07);
-            }
+            // Content
+            notepad_write_string_at(NOTEPAD_START_ROW + i, 4, notepad_buffer[buffer_line], 0x07);
         } else {
             // Empty line beyond content
             notepad_write_string_at(NOTEPAD_START_ROW + i, 0, "   |", 0x08);
@@ -334,14 +241,7 @@ void notepad_update_cursor() {
     
     // Position cursor at current editing position (relative to screen)
     int screen_row = cursor_row - scroll_offset;
-    int display_col = cursor_col;
-    
-    // If word wrap is off and cursor is beyond visible area, show it at the edge
-    if (!word_wrap_enabled && cursor_col >= TEXT_AREA_WIDTH) {
-        display_col = TEXT_AREA_WIDTH - 1;
-    }
-    
-    notepad_set_cursor_position(NOTEPAD_START_ROW + screen_row, 4 + display_col);
+    notepad_set_cursor_position(NOTEPAD_START_ROW + screen_row, 4 + cursor_col);
     notepad_show_cursor();
 }
 
@@ -354,19 +254,8 @@ void notepad_redraw_current_line() {
         for (int i = 4; i < 80; i++) {
             notepad_write_char_at(NOTEPAD_START_ROW + screen_row, i, ' ', 0x07);
         }
-        
         // Redraw the line content
-        if (!word_wrap_enabled && simple_strlen(notepad_buffer[cursor_row]) > TEXT_AREA_WIDTH) {
-            char truncated_line[TEXT_AREA_WIDTH + 1];
-            for (int j = 0; j < TEXT_AREA_WIDTH; j++) {
-                truncated_line[j] = notepad_buffer[cursor_row][j];
-            }
-            truncated_line[TEXT_AREA_WIDTH] = '\0';
-            notepad_write_string_at(NOTEPAD_START_ROW + screen_row, 4, truncated_line, 0x07);
-            notepad_write_char_at(NOTEPAD_START_ROW + screen_row, 79, '>', 0x0C);
-        } else {
-            notepad_write_string_at(NOTEPAD_START_ROW + screen_row, 4, notepad_buffer[cursor_row], 0x07);
-        }
+        notepad_write_string_at(NOTEPAD_START_ROW + screen_row, 4, notepad_buffer[cursor_row], 0x07);
     }
 }
 
@@ -389,15 +278,8 @@ void notepad_insert_char(char c) {
     
     cursor_col++;
     
-    // Check for word wrapping after insertion
-    wrap_line_if_needed();
-    
-    // Redraw screen if wrapping occurred, otherwise just redraw current line
-    if (word_wrap_enabled && simple_strlen(line) > TEXT_AREA_WIDTH) {
-        notepad_draw_interface();
-    } else {
-        notepad_redraw_current_line();
-    }
+    // Redraw current line
+    notepad_redraw_current_line();
 }
 
 void notepad_delete_char() {
@@ -428,9 +310,6 @@ void notepad_delete_char() {
                 if (current_line_count > 1) {
                     current_line_count--;
                 }
-                
-                // Check for wrapping on the merged line
-                wrap_line_if_needed();
                 
                 // Redraw screen
                 notepad_draw_interface();
@@ -513,11 +392,6 @@ void notepad_move_cursor(int delta_row, int delta_col) {
     cursor_col = new_col;
 }
 
-void notepad_toggle_word_wrap() {
-    word_wrap_enabled = !word_wrap_enabled;
-    notepad_draw_interface();  // Redraw to show new wrap status
-}
-
 void notepad_save_and_exit(const char* filename_arg) {
     char final_filename[256];
     
@@ -575,18 +449,6 @@ void notepad_load_file(const char* filename) {
         for (int i = 0; i < result && line_idx < MAX_LINES; i++) {
             if (load_buffer[i] == '\n' || load_buffer[i] == '\r') {
                 notepad_buffer[line_idx][char_idx] = '\0';
-                
-                // Apply word wrapping to loaded line if enabled
-                if (word_wrap_enabled && char_idx > TEXT_AREA_WIDTH) {
-                    int old_cursor_row = cursor_row;
-                    int old_cursor_col = cursor_col;
-                    cursor_row = line_idx;
-                    cursor_col = char_idx;
-                    wrap_line_if_needed();
-                    cursor_row = old_cursor_row;
-                    cursor_col = old_cursor_col;
-                }
-                
                 line_idx++;
                 char_idx = 0;
             } else if (char_idx < MAX_LINE_LENGTH - 1) {
@@ -597,27 +459,10 @@ void notepad_load_file(const char* filename) {
         
         if (char_idx > 0) {
             notepad_buffer[line_idx][char_idx] = '\0';
-            
-            // Apply word wrapping to last line if enabled
-            if (word_wrap_enabled && char_idx > TEXT_AREA_WIDTH) {
-                int old_cursor_row = cursor_row;
-                int old_cursor_col = cursor_col;
-                cursor_row = line_idx;
-                cursor_col = char_idx;
-                wrap_line_if_needed();
-                cursor_row = old_cursor_row;
-                cursor_col = old_cursor_col;
-            }
-            
             line_idx++;
         }
         
         current_line_count = line_idx > 0 ? line_idx : 1;
-        
-        // Start at position 0,0
-        cursor_row = 0;
-        cursor_col = 0;
-        scroll_offset = 0;
     }
 }
 
@@ -681,11 +526,6 @@ void notepad_handle_special_key(int scancode) {
             notepad_scroll_down();
             break;
             
-        // Toggle word wrap
-        case 0x3C: // F2
-            notepad_toggle_word_wrap();
-            break;
-            
         case 0x01: // ESC
             notepad_save_and_exit(notepad_filename);
             return;
@@ -702,10 +542,6 @@ void start_notepad(const char* filename) {
         notepad_load_file(filename);
     } else {
         current_filename[0] = '\0';
-        // Start at position 0,0 for new files too
-        cursor_row = 0;
-        cursor_col = 0;
-        scroll_offset = 0;
     }
     
     notepad_draw_interface();
@@ -716,4 +552,3 @@ void cmd_notepad(const char* filename) {
     simple_strcpy(notepad_filename, filename);
     start_notepad(filename);
 }
-
