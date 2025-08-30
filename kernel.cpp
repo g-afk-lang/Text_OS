@@ -854,8 +854,10 @@ void command_prompt() {
                 else if (stricmp(cmd, "chkdsk") == 0) {
                   cmd_chkdsk(ahci_base, port);
                 }
-                else if (stricmp(cmd, "notepad") == 0) {
-                    cmd_notepad(arg1);  // arg1 can be nullptr for new file
+                else if (stricmp(cmd, "notepad") == 0) { // RENAME command
+                    if(arg1) {
+                      cmd_notepad(arg1);  // arg1 can be nullptr for new file
+                    } else cout << "Usage: notepad <file_name>\n";
                 }
                 else if (stricmp(cmd, "cat") == 0) {
                     cmd_cat(ahci_base, port, arg1);
