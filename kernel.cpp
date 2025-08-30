@@ -750,311 +750,211 @@ void cmd_formatfs(uint64_t ahci_base, int port) {
     if (fat32_format(ahci_base, port, total_sectors, sec_per_clus)) { cout << "\n=== Format Successful! ===\n"; }
     else { cout << "\n=== Format Failed! ===\n"; }
 }
-// === NOTEPAD IMPLEMENTATION - FIXED VERSION ===
+// Enhanced Notepad (compact, feature-complete)
+// Depends on: ahci_base, fat32_read_file_to_buffer, fat32_write_file
+// Provides: cmd_notepad(ahci_base, port, filename); notepad_handle_input(key); is_notepad_running()
 
-// Notepad state variables
-static bool notepad_running = false;
-static char* notepad_buffer = nullptr;
-static int notepad_buffer_capacity = 0;
-static int notepad_buffer_size = 0;
-static int notepad_cursor_pos = 0;
-static int notepad_scroll_offset = 0;
-static char notepad_filename[256];
-static const int NOTEPAD_WIDTH = 78;   // Safe width
-static const int NOTEPAD_HEIGHT = 18;  // Safe height
+#define NP_W 78
+#define NP_H 18
+#define NP_CAP 8192
 
-bool is_notepad_running() {
-    return notepad_running;
+static bool np_run=false;
+static char np_buf[NP_CAP];
+static int np_sz=0, np_cpos=0, np_scroll_line=0, np_goal_col=-1;
+static char np_name[256];
+
+static int np_line_start(int p){ while(p>0 && np_buf[p-1]!='\n') p--; return p; }
+static int np_line_end(int p){ while(p<np_sz && np_buf[p]!='\n') p++; return p; }
+static int np_line_of_pos(int p){
+    int l=0;
+    for (int i=0;i<p && i<np_sz;i++) if (np_buf[i]=='\n') l++;
+    return l;
+}
+static int np_pos_of_line_col(int line, int col){
+    int l=0, i=0;
+    while (i<np_sz && l<line){ if (np_buf[i++]=='\n') l++; }
+    int s=i; while (i<np_sz && np_buf[i]!='\n' && (i-s)<col) i++;
+    return i;
+}
+static int np_total_lines(){
+    int l=0; for (int i=0;i<np_sz;i++) if (np_buf[i]=='\n') l++; 
+    // If buffer doesn't end with newline, count the last line too
+    return l + 1;
+}
+static void np_clamp_cursor(){
+    if (np_cpos<0) np_cpos=0;
+    if (np_cpos>np_sz) np_cpos=np_sz;
 }
 
-// Helper functions with bounds checking
-int count_lines_to_position(const char* buffer, int pos) {
-    if (!buffer || pos < 0) return 0;
-    int lines = 0;
-    for (int i = 0; i < pos && i < notepad_buffer_size; i++) {
-        if (buffer[i] == '\n') {
-            lines++;
-        }
-    }
-    return lines;
+static void np_ensure_cursor_visible(){
+    int cl = np_line_of_pos(np_cpos);
+    if (cl<np_scroll_line) np_scroll_line=cl;
+    else if (cl>=np_scroll_line+NP_H) np_scroll_line = cl-NP_H+1;
+    if (np_scroll_line<0) np_scroll_line=0;
+    int max_top = np_total_lines()-NP_H;
+    if (max_top<0) max_top=0;
+    if (np_scroll_line>max_top) np_scroll_line=max_top;
 }
 
-int find_line_start(const char* buffer, int cursor_pos) {
-    if (!buffer || cursor_pos < 0) return 0;
-    int start = cursor_pos;
-    while (start > 0 && start < notepad_buffer_size && buffer[start - 1] != '\n') {
-        start--;
-    }
-    return start;
-}
-
-int find_line_end(const char* buffer, int buffer_size, int cursor_pos) {
-    if (!buffer || cursor_pos < 0 || cursor_pos >= buffer_size) return cursor_pos;
-    int end = cursor_pos;
-    while (end < buffer_size && buffer[end] != '\n') {
-        end++;
-    }
-    return end;
-}
-
-// Fixed render function with consistent state management
-void notepad_render_screen() {
-    // Validate state first
-    if (notepad_cursor_pos < 0) notepad_cursor_pos = 0;
-    if (notepad_cursor_pos > notepad_buffer_size) notepad_cursor_pos = notepad_buffer_size;
-    if (notepad_scroll_offset < 0) notepad_scroll_offset = 0;
-    
+static void np_render(){
+    if (!np_run) return;
     clear_screen();
-    
-    // Calculate display metrics
-    int cursor_line = count_lines_to_position(notepad_buffer, notepad_cursor_pos);
-    int line_start = find_line_start(notepad_buffer, notepad_cursor_pos);
-    int cursor_col = notepad_cursor_pos - line_start;
-    
-    // Fix scroll offset to keep cursor visible - this is critical
-    if (cursor_line < notepad_scroll_offset) {
-        notepad_scroll_offset = cursor_line;
-    } else if (cursor_line >= notepad_scroll_offset + NOTEPAD_HEIGHT) {
-        notepad_scroll_offset = cursor_line - NOTEPAD_HEIGHT + 1;
+
+    // status header
+    int cl = np_line_of_pos(np_cpos);
+    int ls = np_line_start(np_cpos);
+    int col = np_cpos - ls;
+    cout << "=== Notepad - " << np_name << " ===\n";
+    cout << "Line: " << (cl+1) << " | Col: " << (col+1)
+         << " | Pos: " << np_cpos << " | Size: " << np_sz << "\n";
+    cout << "==============================================================================\n";
+
+    // render content window starting at np_scroll_line
+    int pos=0, line=0;
+    // skip to first visible line
+    while (pos<np_sz && line<np_scroll_line){
+        if (np_buf[pos++]=='\n') line++;
     }
-    
-    // Ensure scroll offset is valid
-    if (notepad_scroll_offset < 0) notepad_scroll_offset = 0;
-    
-    // Header (fixed 3 lines)
-    cout << "=== Notepad - " << notepad_filename << " ===\n";
-    cout << "Line: " << (cursor_line + 1) << " | Col: " << (cursor_col + 1) 
-         << " | Pos: " << notepad_cursor_pos << " | Size: " << notepad_buffer_size << "\n";
-    cout << "================================================================================\n";
-    
-    // Content area - render exactly NOTEPAD_HEIGHT lines
-    int current_line = 0;
-    int pos = 0;
-    
-    // Skip to scroll offset
-    while (pos < notepad_buffer_size && current_line < notepad_scroll_offset) {
-        if (notepad_buffer[pos] == '\n') {
-            current_line++;
-        }
-        pos++;
-    }
-    
-    // Render visible content
-    for (int display_line = 0; display_line < NOTEPAD_HEIGHT; display_line++) {
-        // Find line boundaries
-        int line_start_pos = pos;
-        int line_end_pos = pos;
-        
-        // Find end of current line
-        while (line_end_pos < notepad_buffer_size && notepad_buffer[line_end_pos] != '\n') {
-            line_end_pos++;
-        }
-        
-        // Render this line
-        bool cursor_shown = false;
-        for (int col = 0; col < NOTEPAD_WIDTH; col++) {
-            int char_pos = line_start_pos + col;
-            
-            if (char_pos == notepad_cursor_pos && !cursor_shown) {
-                cout << "_";  // Show cursor
-                cursor_shown = true;
-            } else if (char_pos < line_end_pos && char_pos < notepad_buffer_size) {
-                cout << notepad_buffer[char_pos];
-            } else if (char_pos == line_end_pos && char_pos == notepad_cursor_pos && !cursor_shown) {
-                cout << "_";  // Cursor at end of line
-                cursor_shown = true;
+
+    for (int d=0; d<NP_H; d++){
+        int s=pos, e=pos;
+        while (e<np_sz && np_buf[e]!='\n') e++;
+
+        bool cursor_shown=false;
+        for (int i=0;i<NP_W;i++){
+            int cp = s+i;
+            if (cp==np_cpos && !cursor_shown){
+                cout << "_";
+                cursor_shown=true;
+            } else if (cp<e && cp<np_sz && cp!=np_cpos){
+                cout << np_buf[cp];
             } else {
-                cout << " ";  // Fill with spaces
+                cout << ' ';
             }
         }
         cout << "\n";
-        
-        // Move to next line
-        pos = line_end_pos;
-        if (pos < notepad_buffer_size && notepad_buffer[pos] == '\n') {
-            pos++; // Skip newline
-        }
-        
-        // If we've reached end of buffer, just show empty lines
-        if (pos >= notepad_buffer_size) {
-            // Show cursor at end if needed
-            if (notepad_cursor_pos >= notepad_buffer_size && !cursor_shown && display_line == 0) {
-                // Backtrack and show cursor
-                cout << "\x1b[1A"; // Move cursor up
-                for (int i = 0; i < NOTEPAD_WIDTH - 1; i++) cout << " ";
-                //cout << "_\n";
-            }
-            break;
-        }
+
+        pos = (e<np_sz && np_buf[e]=='\n') ? e+1 : e;
+        line++;
     }
-    
-    // Footer (fixed 2 lines)
-    cout << "================================================================================\n";
-    cout << "ESC: Save & Exit | Arrow Keys: Navigate | Home/End: Line Start/End\n";
+
+    cout << "==============================================================================\n";
+    cout << "ESC:Save/Exit | Enter/Tab | Arrows | Home/End | BS/Delete | PgUp/PgDn\n";
 }
 
-// Fixed input handler with proper state management
-void notepad_handle_input(char key) {
-    if (!notepad_running || !notepad_buffer) return;
-    
-    // Save old state for comparison
-    int old_cursor_pos = notepad_cursor_pos;
-    int old_buffer_size = notepad_buffer_size;
-    
-    switch (key) {
-        case 27: // ESC - Save and exit
-            if (fat32_write_file(ahci_base, 0, notepad_filename, notepad_buffer, notepad_buffer_size) == 0) {
-                clear_screen();
-                cout << "File saved successfully.\n";
-            } else {
-                clear_screen();
-                cout << "Error saving file.\n";
-            }
-            delete[] notepad_buffer;
-            notepad_buffer = nullptr;
-            notepad_running = false;
+// text ops
+static void np_insert_char(char ch){
+    if (np_sz>=NP_CAP-1) return;
+    for (int i=np_sz; i>np_cpos; i--) np_buf[i]=np_buf[i-1];
+    np_buf[np_cpos]=ch; np_sz++; np_cpos++;
+}
+static void np_delete_at_cursor(){ // Delete key behavior
+    if (np_cpos>=np_sz) return;
+    for (int i=np_cpos; i<np_sz-1; i++) np_buf[i]=np_buf[i+1];
+    np_sz--;
+}
+static void np_backspace(){
+    if (np_cpos<=0) return;
+    for (int i=np_cpos-1; i<np_sz-1; i++) np_buf[i]=np_buf[i+1];
+    np_sz--; np_cpos--;
+}
+
+// movement
+static void np_move_left(){ if (np_cpos>0){ np_cpos--; np_goal_col=-1; } }
+static void np_move_right(){ if (np_cpos<np_sz){ np_cpos++; np_goal_col=-1; } }
+static void np_move_home(){ np_cpos = np_line_start(np_cpos); np_goal_col=-1; }
+static void np_move_end(){ np_cpos = np_line_end(np_cpos); np_goal_col=-1; }
+static void np_move_up(){
+    int s = np_line_start(np_cpos);
+    int col = (np_goal_col>=0)? np_goal_col : (np_cpos - s);
+    if (s==0){ np_goal_col=col; return; }
+    int prev_end = s-1;
+    int prev_start = np_line_start(prev_end);
+    int prev_len = prev_end - prev_start;
+    int target_col = (col<=prev_len)? col : prev_len;
+    np_cpos = prev_start + target_col;
+    np_goal_col = col;
+}
+static void np_move_down(){
+    int e = np_line_end(np_cpos);
+    int s = np_line_start(np_cpos);
+    int col = (np_goal_col>=0)? np_goal_col : (np_cpos - s);
+    if (e>=np_sz){ np_goal_col=col; return; }
+    int next_start = e+1;
+    int next_end = np_line_end(next_start);
+    int next_len = next_end - next_start;
+    int target_col = (col<=next_len)? col : next_len;
+    np_cpos = next_start + target_col;
+    np_goal_col = col;
+}
+static void np_page_up(){
+    for (int i=0;i<NP_H;i++) np_move_up();
+}
+static void np_page_down(){
+    for (int i=0;i<NP_H;i++) np_move_down();
+}
+
+void notepad_handle_input(char key){
+    if (!np_run) return;
+
+    switch (key){
+        case 27: { // ESC save and exit
+            fat32_write_file(ahci_base, 0, np_name, np_buf, np_sz);
+            np_run=false; clear_screen(); cout << "Saved\n";
             return;
-            
-        case '\x10': // Up arrow
-            if (notepad_cursor_pos > 0) {
-                int current_line_start = find_line_start(notepad_buffer, notepad_cursor_pos);
-                int current_col = notepad_cursor_pos - current_line_start;
-                
-                if (current_line_start > 0) {
-                    int prev_line_end = current_line_start - 1;
-                    int prev_line_start = find_line_start(notepad_buffer, prev_line_end);
-                    int prev_line_length = prev_line_end - prev_line_start;
-                    
-                    if (current_col <= prev_line_length) {
-                        notepad_cursor_pos = prev_line_start + current_col;
-                    } else {
-                        notepad_cursor_pos = prev_line_end;
-                    }
-                }
-            }
-            break;
-            
-        case '\x11': // Down arrow
-            {
-                int current_line_end = find_line_end(notepad_buffer, notepad_buffer_size, notepad_cursor_pos);
-                
-                if (current_line_end < notepad_buffer_size) {
-                    int current_line_start = find_line_start(notepad_buffer, notepad_cursor_pos);
-                    int current_col = notepad_cursor_pos - current_line_start;
-                    
-                    int next_line_start = current_line_end + 1;
-                    int next_line_end = find_line_end(notepad_buffer, notepad_buffer_size, next_line_start);
-                    int next_line_length = next_line_end - next_line_start;
-                    
-                    if (current_col <= next_line_length) {
-                        notepad_cursor_pos = next_line_start + current_col;
-                    } else {
-                        notepad_cursor_pos = next_line_end;
-                    }
-                }
-            }
-            break;
-            
-        case '\x12': // Left arrow
-            if (notepad_cursor_pos > 0) {
-                notepad_cursor_pos--;
-            }
-            break;
-            
-        case '\x13': // Right arrow
-            if (notepad_cursor_pos < notepad_buffer_size) {
-                notepad_cursor_pos++;
-            }
-            break;
-            
-        case '\x14': // Home
-            notepad_cursor_pos = find_line_start(notepad_buffer, notepad_cursor_pos);
-            break;
-            
-        case '\x15': // End
-            notepad_cursor_pos = find_line_end(notepad_buffer, notepad_buffer_size, notepad_cursor_pos);
-            break;
-            
+        }
+        case '\n':
+        case '\r':
+            np_insert_char('\n'); break;
+        case '\t':
+            np_insert_char('\t'); break;
         case '\b': // Backspace
-            if (notepad_cursor_pos > 0) {
-                // Shift characters left
-                for (int i = notepad_cursor_pos - 1; i < notepad_buffer_size - 1; i++) {
-                    notepad_buffer[i] = notepad_buffer[i + 1];
-                }
-                notepad_buffer_size--;
-                notepad_cursor_pos--;
-                notepad_buffer[notepad_buffer_size] = '\0'; // Null terminate
-            }
-            break;
-            
-        default: // Regular character input
-            if ((key >= 32 && key <= 126) || key == '\n' || key == '\t') {
-                if (notepad_buffer_size < notepad_buffer_capacity - 1) {
-                    // Shift characters right
-                    for (int i = notepad_buffer_size; i > notepad_cursor_pos; i--) {
-                        notepad_buffer[i] = notepad_buffer[i - 1];
-                    }
-                    notepad_buffer[notepad_cursor_pos] = key;
-                    notepad_buffer_size++;
-                    notepad_cursor_pos++;
-                    notepad_buffer[notepad_buffer_size] = '\0'; // Null terminate
-                }
-            }
+            np_backspace(); break;
+        case '\x7F': // Delete (if generated)
+            np_delete_at_cursor(); break;
+        case '\x10': // Up
+            np_move_up(); break;
+        case '\x11': // Down
+            np_move_down(); break;
+        case '\x12': // Left
+            np_move_left(); break;
+        case '\x13': // Right
+            np_move_right(); break;
+        case '\x14': // Home
+            np_move_home(); break;
+        case '\x15': // End
+            np_move_end(); break;
+        case '\x16': // PgUp (optional binding)
+            np_page_up(); break;
+        case '\x17': // PgDn (optional binding)
+            np_page_down(); break;
+        default:
+            if (key>=32 && key<=126) np_insert_char(key);
             break;
     }
-    
-    // Validate final state
-    if (notepad_cursor_pos < 0) notepad_cursor_pos = 0;
-    if (notepad_cursor_pos > notepad_buffer_size) notepad_cursor_pos = notepad_buffer_size;
-    
-    // Always redraw to ensure consistency
-    notepad_render_screen();
+
+    np_clamp_cursor();
+    np_ensure_cursor_visible();
+    np_render();
 }
 
-// Enhanced cmd_notepad with better initialization
-void cmd_notepad(uint64_t ahci_base, int port, const char* filename) {
-    if (!filename) {
-        cout << "Usage: notepad <filename>\n";
-        return;
-    }
-    
-    // Clean up any existing state
-    if (notepad_buffer) {
-        delete[] notepad_buffer;
-        notepad_buffer = nullptr;
-    }
-    
-    // Initialize state
-    notepad_running = true;
-    notepad_buffer_capacity = 4096;
-    notepad_buffer = new char[notepad_buffer_capacity];
-    if (!notepad_buffer) {
-        cout << "Error: Could not allocate memory.\n";
-        notepad_running = false;
-        return;
-    }
-    
-    // Clear buffer
-    simple_memset(notepad_buffer, 0, notepad_buffer_capacity);
-    simple_strcpy(notepad_filename, filename);
-    
-    // Try to load existing file
-    int bytes_read = fat32_read_file_to_buffer(ahci_base, port, filename, notepad_buffer, notepad_buffer_capacity - 1);
-    if (bytes_read > 0) {
-        notepad_buffer_size = bytes_read;
-    } else {
-        notepad_buffer_size = 0;
-    }
-    
-    // Initialize cursor and scroll
-    notepad_cursor_pos = 0;
-    notepad_scroll_offset = 0;
-    
-    // Render initial screen
-    notepad_render_screen();
+bool is_notepad_running(){ return np_run; }
+
+void cmd_notepad(uint64_t ahci_base_in, int port, const char* filename){
+    if (!filename || !*filename){ cout << "Usage: notepad <filename>\n"; return; }
+    // Name
+    int n=0; while (filename[n] && n<255){ np_name[n]=filename[n]; n++; } np_name[n]='\0';
+    // Load file
+    int rd = fat32_read_file_to_buffer(ahci_base_in, port, filename, np_buf, NP_CAP-1);
+    if (rd<0) rd=0;
+    np_sz = rd;
+    np_buf[np_sz]='\0';
+    np_cpos=0;
+    np_scroll_line=0;
+    np_goal_col=-1;
+    np_run=true;
+    np_render();
 }
-
-
 
 // --- COMMAND IMPLEMENTATIONS ---
 void cmd_help() { cout << "--- KERNEL COMMANDS ---\n  help, clear, pong, ls, rm, touch, notepad\n  cp <src> <dest>, mv <old> <new>\n  formatfs, mount, unmount, fsinfo, chkdsk\n"; }
