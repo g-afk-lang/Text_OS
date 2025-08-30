@@ -29,7 +29,7 @@ static bool shift_pressed = false;
 #define KEY_F5 -5
 
 // ADD MISSING FORWARD DECLARATIONS
-extern bool is_notepad_running();
+
 extern void notepad_handle_input(char key);
 
 // Keyboard scancode tables
@@ -100,28 +100,7 @@ extern "C" void keyboard_handler() {
     
     // Handle extended keys (arrow keys, etc.)
     if (extended_key) {
-        if (is_notepad_running()) {
-            switch (scancode) {
-                case SCANCODE_UP:
-                    notepad_handle_input('\x10'); // Custom up code
-                    break;
-                case SCANCODE_DOWN:
-                    notepad_handle_input('\x11'); // Custom down code
-                    break;
-                case SCANCODE_LEFT:
-                    notepad_handle_input('\x12'); // Custom left code
-                    break;
-                case SCANCODE_RIGHT:
-                    notepad_handle_input('\x13'); // Custom right code
-                    break;
-                case SCANCODE_HOME:
-                    notepad_handle_input('\x14'); // Custom home code
-                    break;
-                case SCANCODE_END:
-                    notepad_handle_input('\x15'); // Custom end code
-                    break;
-            }
-        } else if (is_pong_running()) {
+        if (is_pong_running()) {
             switch (scancode) {
                 case SCANCODE_UP:
                     pong_handle_input('w'); // Map up arrow to W
@@ -145,23 +124,14 @@ extern "C" void keyboard_handler() {
         return;
     }
     
-    // Handle ESC key specially
-    if (scancode == SCANCODE_ESC) {
-        if (is_notepad_running()) {
-            notepad_handle_input(27); // ESC ASCII code
-        }
-        outb(0x20, 0x20);
-        return;
-    }
+  
     
     // Normal input handling
     const char* current_scancode_table = shift_pressed ? scancode_to_ascii_shifted : scancode_to_ascii;
     char key = current_scancode_table[scancode];
     
     if (key != 0) {
-        if (is_notepad_running()) {
-            notepad_handle_input(key);
-        } else if (is_pong_running()) {
+         if (is_pong_running()) {
             pong_handle_input(key);
         } else {
             // Normal terminal input handling
@@ -190,7 +160,7 @@ extern "C" void timer_handler() {
     // Update Pong game if it's running
     if (is_pong_running()) {
         pong_update();
-    } else if (!is_notepad_running()) {
+    } else if (!is_pong_running()) {
         // Only blink cursor when not in game AND not in notepad
         update_cursor_state();
     }
