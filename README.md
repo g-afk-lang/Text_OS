@@ -8,4 +8,6 @@ TODO: examine chkdsk upon mutiOS file writes, for spurious deletion.
 Dump DMA and PCIE to file...
 
 
+sudo dd if=/home/george/Desktop/Tex/Text_OS-main/main.iso of=/dev/sdX
+
 
