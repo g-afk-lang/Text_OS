@@ -10,18 +10,28 @@ struct gdt_entry gdt[3];
 struct gdt_ptr gdtp;
 
 // --- KEYBOARD STATE ---
-static bool shift_pressed = false; 
+static bool shift_pressed = false;
+
 
 // --- SCANCODE CONSTANTS ---
-#define SCANCODE_L_SHIFT_PRESS   0x2A
-#define SCANCODE_R_SHIFT_PRESS   0x36
+#define SCANCODE_L_SHIFT_PRESS 0x2A
+#define SCANCODE_R_SHIFT_PRESS 0x36
 #define SCANCODE_L_SHIFT_RELEASE 0xAA
 #define SCANCODE_R_SHIFT_RELEASE 0xB6
-#define SCANCODE_UP              0x48
-#define SCANCODE_DOWN            0x50
-#define SCANCODE_F5_PRESS        0x3F
+#define SCANCODE_UP 0x48
+#define SCANCODE_DOWN 0x50
+#define SCANCODE_LEFT 0x4B      // ADD MISSING
+#define SCANCODE_RIGHT 0x4D     // ADD MISSING
+#define SCANCODE_HOME 0x47      // ADD MISSING
+#define SCANCODE_END 0x4F       // ADD MISSING
+#define SCANCODE_F5_PRESS 0x3F
+#define SCANCODE_ESC 0x01       // ADD MISSING
+#define KEY_F5 -5
 
-#define KEY_F5                   -5
+// ADD MISSING FORWARD DECLARATIONS
+extern bool is_notepad_running();
+extern void notepad_handle_input(char key);
+
 // Keyboard scancode tables
 const char scancode_to_ascii[128] = {
     0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -50,48 +60,68 @@ const char extended_scancode_table[128] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
+// COMPLETELY REPLACE keyboard_handler() function
 extern "C" void keyboard_handler() {
-    /* Read scancode from keyboard data port */
     uint8_t scancode = inb(0x60);
-
-    /* Check for extended key code (0xE0) */
+    
+    // Check for extended key code (0xE0)
     if (scancode == 0xE0) {
         extended_key = true;
-        outb(0x20, 0x20); // Send EOI
+        outb(0x20, 0x20);
         return;
     }
-
-    // Handle F5 key press to start Pong (check scancode directly)
+    
+    // Handle F5 key press to start Pong
     if (scancode == SCANCODE_F5_PRESS) {
         start_pong_game();
         outb(0x20, 0x20);
         return;
     }
-
+    
     // Handle Shift key press and release
     if (scancode == SCANCODE_L_SHIFT_PRESS || scancode == SCANCODE_R_SHIFT_PRESS) {
         shift_pressed = true;
-        outb(0x20, 0x20); // Send EOI
+        outb(0x20, 0x20);
         return;
     }
-
+    
     if (scancode == SCANCODE_L_SHIFT_RELEASE || scancode == SCANCODE_R_SHIFT_RELEASE) {
         shift_pressed = false;
-        outb(0x20, 0x20); // Send EOI
+        outb(0x20, 0x20);
         return;
     }
-
-    /* Handle key release (bit 7 set) for non-shift keys */
+    
+    // Handle key release (bit 7 set) for non-shift keys
     if (scancode & 0x80) {
-        extended_key = false; // Reset extended key flag on any key release
-        outb(0x20, 0x20); // Send EOI
+        extended_key = false;
+        outb(0x20, 0x20);
         return;
     }
-
-    // Handle special keys for extended keyboard sequences
+    
+    // Handle extended keys (arrow keys, etc.)
     if (extended_key) {
-        // If Pong is running, handle extended keys for game
-        if (is_pong_running()) {
+        if (is_notepad_running()) {
+            switch (scancode) {
+                case SCANCODE_UP:
+                    notepad_handle_input('\x10'); // Custom up code
+                    break;
+                case SCANCODE_DOWN:
+                    notepad_handle_input('\x11'); // Custom down code
+                    break;
+                case SCANCODE_LEFT:
+                    notepad_handle_input('\x12'); // Custom left code
+                    break;
+                case SCANCODE_RIGHT:
+                    notepad_handle_input('\x13'); // Custom right code
+                    break;
+                case SCANCODE_HOME:
+                    notepad_handle_input('\x14'); // Custom home code
+                    break;
+                case SCANCODE_END:
+                    notepad_handle_input('\x15'); // Custom end code
+                    break;
+            }
+        } else if (is_pong_running()) {
             switch (scancode) {
                 case SCANCODE_UP:
                     pong_handle_input('w'); // Map up arrow to W
@@ -111,23 +141,27 @@ extern "C" void keyboard_handler() {
             }
         }
         extended_key = false;
-        outb(0x20, 0x20); // Send EOI
+        outb(0x20, 0x20);
         return;
     }
-
-    /* Normal input handling */
-    // Choose the correct scancode table based on whether Shift is pressed
+    
+    // Handle ESC key specially
+    if (scancode == SCANCODE_ESC) {
+        if (is_notepad_running()) {
+            notepad_handle_input(27); // ESC ASCII code
+        }
+        outb(0x20, 0x20);
+        return;
+    }
+    
+    // Normal input handling
     const char* current_scancode_table = shift_pressed ? scancode_to_ascii_shifted : scancode_to_ascii;
     char key = current_scancode_table[scancode];
-
-    // Handle ESC key (scancode 0x01) manually since it's not in your ASCII table
-    if (scancode == 0x01) {
-        key = 27; // ESC ASCII code
-    }
-
+    
     if (key != 0) {
-        // If Pong is running, send all input to the game
-        if (is_pong_running()) {
+        if (is_notepad_running()) {
+            notepad_handle_input(key);
+        } else if (is_pong_running()) {
             pong_handle_input(key);
         } else {
             // Normal terminal input handling
@@ -147,21 +181,20 @@ extern "C" void keyboard_handler() {
             }
         }
     }
-
-    /* Send EOI to PIC */
+    
     outb(0x20, 0x20);
 }
 
-
-/* Timer interrupt handler */
+// REPLACE timer_handler() to prevent blink glitch
 extern "C" void timer_handler() {
     // Update Pong game if it's running
     if (is_pong_running()) {
         pong_update();
-    } else {
-        // Only blink cursor when not in game
+    } else if (!is_notepad_running()) {
+        // Only blink cursor when not in game AND not in notepad
         update_cursor_state();
     }
+    // Don't update cursor when notepad is running to prevent blink glitch
     
     // Send EOI to PIC
     outb(0x20, 0x20);
@@ -223,10 +256,10 @@ extern "C" void keyboard_handler_wrapper();
 asm(
     ".global keyboard_handler_wrapper\n"
     "keyboard_handler_wrapper:\n"
-    "    pusha\n"            // Save registers
-    "    call keyboard_handler\n" // Call our C++ handler
-    "    popa\n"             // Restore registers
-    "    iret\n"             // Return from interrupt
+    " pusha\n" // Save registers
+    " call keyboard_handler\n" // Call our C++ handler
+    " popa\n" // Restore registers
+    " iret\n" // Return from interrupt
 );
 
 /* Timer interrupt handler wrapper */
@@ -234,10 +267,10 @@ extern "C" void timer_handler_wrapper();
 asm(
     ".global timer_handler_wrapper\n"
     "timer_handler_wrapper:\n"
-    "    pusha\n"            // Save registers
-    "    call timer_handler\n" // Call our C++ handler
-    "    popa\n"             // Restore registers
-    "    iret\n"             // Return from interrupt
+    " pusha\n" // Save registers
+    " call timer_handler\n" // Call our C++ handler
+    " popa\n" // Restore registers
+    " iret\n" // Return from interrupt
 );
 
 /* Initialize PIC */
