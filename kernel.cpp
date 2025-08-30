@@ -22,9 +22,18 @@
 #define ATTR_VOLUME_ID 0x08
 #define ATTR_ARCHIVE 0x20
 #define DELETED_ENTRY 0xE5
+
+
+
 static const uint32_t FAT_FREE_CLUSTER = 0x00000000;
 static const uint32_t FAT_END_OF_CHAIN = 0x0FFFFFFF;
 static const uint32_t FAT_BAD_CLUSTER  = 0x0FFFFFF7;
+
+
+
+// --- Add to FORWARD DECLARATIONS ---
+int fat32_rename_file(uint64_t ahci_base, int port, const char* old_name, const char* new_name);
+int fat32_copy_file(uint64_t ahci_base, int port, const char* src_name, const char* dest_name);
 
 
 // --- FORWARD DECLARATIONS ---
@@ -141,7 +150,209 @@ void from_83_format(const char* fat_name, char* out) { int i, j = 0; for (i = 0;
 static inline uint64_t cluster_to_lba(uint32_t cluster) { if (cluster < 2) return 0; return data_start_sector + ((uint64_t)(cluster - 2) * fat32_bpb.sec_per_clus); }
 uint32_t clusters_needed(uint32_t size) { uint32_t cluster_size = fat32_bpb.sec_per_clus * fat32_bpb.bytes_per_sec; return (size + cluster_size - 1) / cluster_size; }
 
-// --- CORE FAT32 FUNCTION IMPLEMENTATIONS ---
+
+// --- Add to FILE OPERATION IMPLEMENTATIONS ---
+// --- Add near the top of your file, after the includes ---
+
+// A memory-efficient bitmap class to track cluster usage.
+// Uses 1 bit per cluster instead of 1 byte, reducing memory usage by 8x.
+class Bitmap {
+private:
+    uint8_t* buffer;
+    size_t size_in_bits;
+
+public:
+    Bitmap(size_t bits) : size_in_bits(bits) {
+        // Calculate size in bytes, rounding up.
+        size_t buffer_size = (bits + 7) / 8;
+        buffer = new uint8_t[buffer_size];
+        if (buffer) {
+            // Clear the bitmap initially.
+            simple_memset(buffer, 0, buffer_size);
+        }
+    }
+
+    ~Bitmap() {
+        delete[] buffer;
+    }
+
+    // Returns true if the memory was successfully allocated.
+    bool is_valid() const {
+        return buffer != nullptr;
+    }
+
+    // Set a bit to 1 (true).
+    void set(size_t bit) {
+        if (bit >= size_in_bits) return;
+        buffer[bit / 8] |= (1 << (bit % 8));
+    }
+
+    // Test if a bit is 1.
+    bool test(size_t bit) const {
+        if (bit >= size_in_bits) return false;
+        return (buffer[bit / 8] & (1 << (bit % 8))) != 0;
+    }
+};
+
+
+// --- Helper function for chkdsk (now uses the Bitmap) ---
+void scan_directory_for_chkdsk(uint64_t ahci_base, int port, uint32_t dir_cluster, Bitmap& cluster_map, uint32_t max_clusters) {
+    if (dir_cluster < 2 || dir_cluster >= max_clusters) return;
+    
+    uint8_t buffer[SECTOR_SIZE];
+    uint32_t current_dir_cluster = dir_cluster;
+
+    while (current_dir_cluster >= 2 && current_dir_cluster < FAT_BAD_CLUSTER) {
+        // Mark the directory cluster itself as used
+        cluster_map.set(current_dir_cluster);
+
+        uint64_t lba = cluster_to_lba(current_dir_cluster);
+        for (uint8_t s = 0; s < fat32_bpb.sec_per_clus; s++) {
+            if (read_sectors(ahci_base, port, lba + s, 1, buffer) != 0) return;
+            for (uint16_t e = 0; e < SECTOR_SIZE / ENTRY_SIZE; e++) {
+                fat_dir_entry_t *entry = (fat_dir_entry_t *)(buffer + e * ENTRY_SIZE);
+
+                if (entry->name[0] == 0x00) {
+                    current_dir_cluster = FAT_END_OF_CHAIN;
+                    break;
+                }
+                if (entry->name[0] == DELETED_ENTRY) continue;
+
+                uint32_t file_cluster = (entry->fst_clus_hi << 16) | entry->fst_clus_lo;
+                
+                if ((entry->attr & ATTR_DIRECTORY) && entry->name[0] != '.') {
+                    scan_directory_for_chkdsk(ahci_base, port, file_cluster, cluster_map, max_clusters);
+                } else {
+                    uint32_t current_file_cluster = file_cluster;
+                    while (current_file_cluster >= 2 && current_file_cluster < FAT_BAD_CLUSTER) {
+                        cluster_map.set(current_file_cluster);
+                        current_file_cluster = read_fat_entry(ahci_base, port, current_file_cluster);
+                    }
+                }
+            }
+        }
+        if (current_dir_cluster < FAT_BAD_CLUSTER) {
+             current_dir_cluster = read_fat_entry(ahci_base, port, current_dir_cluster);
+        }
+    }
+}
+
+
+// --- The main chkdsk command (now uses the Bitmap) ---
+void cmd_chkdsk(uint64_t ahci_base, int port) {
+    cout << "Checking filesystem for errors...\n";
+
+    uint32_t total_data_sectors = fat32_bpb.tot_sec32 - data_start_sector;
+    uint32_t max_clusters = total_data_sectors / fat32_bpb.sec_per_clus + 2;
+    
+    // Use the memory-efficient Bitmap class for the cluster map.
+    Bitmap cluster_map(max_clusters);
+    if (!cluster_map.is_valid()) {
+        cout << "Error: Not enough memory to run chkdsk.\n";
+        return;
+    }
+
+    cout << "Phase 1: Verifying files and directories...\n";
+    scan_directory_for_chkdsk(ahci_base, port, fat32_bpb.root_clus, cluster_map, max_clusters);
+    
+    cout << "Phase 2: Verifying file allocation table...\n";
+    uint32_t orphaned_clusters_found = 0;
+    for (uint32_t cluster = 2; cluster < max_clusters; cluster++) {
+        uint32_t fat_entry = read_fat_entry(ahci_base, port, cluster);
+
+        // If the FAT says this cluster is in use, but our map says it's not...
+        if (fat_entry != FAT_FREE_CLUSTER && !cluster_map.test(cluster)) {
+            cout << "Found orphaned cluster: " << cluster << ". Reclaiming...\n";
+            write_fat_entry(ahci_base, port, cluster, FAT_FREE_CLUSTER);
+            orphaned_clusters_found++;
+        }
+    }
+
+    if (orphaned_clusters_found > 0) {
+        cout << "\nCHKDSK finished. Reclaimed " << orphaned_clusters_found << " orphaned clusters.\n";
+    } else {
+        cout << "\nCHKDSK finished. No errors found.\n";
+    }
+}
+
+// Renames a file by finding its directory entry and changing the name field.
+int fat32_rename_file(uint64_t ahci_base, int port, const char* old_name, const char* new_name) {
+    uint8_t buffer[SECTOR_SIZE];
+    uint64_t lba = cluster_to_lba(current_directory_cluster);
+    char old_target[11], new_target[11];
+    to_83_format(old_name, old_target);
+    to_83_format(new_name, new_target);
+
+    for (uint8_t s = 0; s < fat32_bpb.sec_per_clus; s++) {
+        if (read_sectors(ahci_base, port, lba + s, (uint32_t)1, buffer) != 0) return -1; // Read error
+
+        for (uint16_t e = 0; e < SECTOR_SIZE / ENTRY_SIZE; e++) {
+            fat_dir_entry_t *entry = (fat_dir_entry_t *)(buffer + e * ENTRY_SIZE);
+            if (entry->name[0] == 0x00) return -2; // File not found
+
+            if (entry->name[0] != DELETED_ENTRY && simple_memcmp(entry->name, old_target, 11) == 0) {
+                // Found the file, now rename it
+                simple_memcpy(entry->name, new_target, 11);
+                
+                // Write the modified directory sector back to disk
+                if (write_sectors(ahci_base, port, lba + s, (uint32_t)1, buffer) != 0) {
+                    return -3; // Write error
+                }
+                return 0; // Success
+            }
+        }
+    }
+    return -2; // File not found
+}
+
+// Copies a file by reading it into memory and creating a new file with its contents.
+int fat32_copy_file(uint64_t ahci_base, int port, const char* src_name, const char* dest_name) {
+    uint8_t dir_sector_buffer[SECTOR_SIZE];
+    uint64_t lba = cluster_to_lba(current_directory_cluster);
+    char src_target[11];
+    to_83_format(src_name, src_target);
+    
+    // 1. Find the source file to get its size
+    uint32_t file_size = 0;
+    bool found = false;
+    for (uint8_t s = 0; s < fat32_bpb.sec_per_clus; s++) {
+        if (read_sectors(ahci_base, port, lba + s, (uint32_t)1, dir_sector_buffer) != 0) return -1;
+        for (uint16_t e = 0; e < SECTOR_SIZE / ENTRY_SIZE; e++) {
+            fat_dir_entry_t* entry = (fat_dir_entry_t*)(dir_sector_buffer + e * ENTRY_SIZE);
+            if (entry->name[0] == 0) break;
+            if (entry->name[0] != DELETED_ENTRY && simple_memcmp(entry->name, src_target, 11) == 0) {
+                file_size = entry->file_size;
+                found = true;
+                break;
+            }
+        }
+        if (found) break;
+    }
+
+    if (!found) return -2; // Source file not found
+    if (file_size == 0) { // Handle empty file case
+        return fat32_add_file(ahci_base, port, dest_name, "", 0);
+    }
+
+    // 2. Allocate memory and read the source file into the buffer
+    char* file_buffer = new char[file_size];
+    if (!file_buffer) return -4; // Memory allocation failed
+
+    int bytes_read = fat32_read_file_to_buffer(ahci_base, port, src_name, file_buffer, file_size + 1);
+    if (bytes_read < 0) {
+        delete[] file_buffer;
+        return -1; // Read error
+    }
+
+    // 3. Write the buffer to the destination file
+    int result = fat32_add_file(ahci_base, port, dest_name, file_buffer, file_size);
+    
+    // 4. Clean up and return
+    delete[] file_buffer;
+    return result;
+}
+
+
 
 bool fat32_init(uint64_t ahci_base, int port) {
     uint8_t buffer[SECTOR_SIZE];
@@ -520,7 +731,7 @@ bool fat32_format(uint64_t ahci_base, int port, uint32_t total_sectors, uint8_t 
 
 
 // --- COMMAND IMPLEMENTATIONS ---
-void cmd_help() { cout << "--- KERNEL COMMANDS ---\n  help, clear, formatfs, mount, unmount, ls, rm, touch, create, notepad, fsinfo\n"; }
+
 bool fat32_format(uint64_t ahci_base, int port, uint32_t total_sectors, uint8_t sectors_per_cluster); // Defined above
 void cmd_formatfs(uint64_t ahci_base, int port) {
     cout << "=== FAT32 Format Utility ===\n";
@@ -545,12 +756,12 @@ void cmd_notepad(uint64_t ahci_base, int port, const char* filename) {
     int bytes_read = fat32_read_file_to_buffer(ahci_base, port, filename, text_buffer, buffer_size);
     if (bytes_read > 0) { cout << "--- File Content ---\n" << text_buffer << "--------------------\n"; }
     else { cout << "File is new or empty.\n"; }
-    cout << "Enter text. Type '[quit]' on a new line to save and quit.\n";
+    cout << "Enter text. Type 'Quit;' on a new line to save and quit.\n";
     char line_buffer[256];
     size_t current_len = simple_strlen(text_buffer);
     while (true) {
         cout << "edit> "; cin >> line_buffer;
-        if (stricmp(line_buffer, "[quit]") == 0) break;
+        if (stricmp(line_buffer, "Quit;") == 0) break;
         size_t line_len = simple_strlen(line_buffer);
         if (current_len + line_len + 2 < buffer_size) {
             simple_strcat(text_buffer, line_buffer); simple_strcat(text_buffer, "\n");
@@ -561,40 +772,100 @@ void cmd_notepad(uint64_t ahci_base, int port, const char* filename) {
     else { cout << "Error saving file.\n"; }
     delete[] text_buffer;
 }
+// --- COMMAND IMPLEMENTATIONS ---
+void cmd_help() { cout << "--- KERNEL COMMANDS ---\n  help, clear, ls, rm, touch, notepad\n  cp <src> <dest>, mv <old> <new>\n  formatfs, mount, unmount, fsinfo, chkdsk\n"; }
 
-// --- COMMAND PROMPT ---
+
+// --- COMMAND PROMPT (Rewritten for better argument parsing) ---
 void command_prompt() {
-    char input[MAX_COMMAND_LENGTH + 1];
-    ahci_base = disk_init(); int port = 0; bool fat32_initialized = false;
-    cout << "Kernel Command Prompt. Type 'help' for commands.\n\n";
-    while (true) {
-        cout << "> "; cin >> input;
-        char* space = simple_strchr(input, ' ');
-        char* args = nullptr;
-        if (space) { *space = '\0'; args = space + 1; }
-        char* cmd = input;
+    char line[MAX_COMMAND_LENGTH + 1];
+    ahci_base = disk_init(); 
+    int port = 0; 
+    bool fat32_initialized = false;
 
+    cout << "Kernel Command Prompt. Type 'help' for commands.\n\n";
+
+    while (true) {
+        cout << "> ";
+        cin >> line; // This now uses the robust line reader from iostream_wrapper
+
+        // --- Argument Parser ---
+        char* parts[3] = {nullptr, nullptr, nullptr}; // cmd, arg1, arg2
+        int part_count = 0;
+        char* next_part = line;
+        
+        while (part_count < 3 && next_part && *next_part != '\0') {
+            parts[part_count++] = next_part;
+            char* space = simple_strchr(next_part, ' ');
+            if (space) {
+                *space = '\0';
+                next_part = space + 1;
+                while (*next_part == ' ') next_part++; // Skip multiple spaces
+            } else {
+                next_part = nullptr;
+            }
+        }
+        
+        char* cmd = parts[0];
+        char* arg1 = parts[1];
+        char* arg2 = parts[2];
+
+        if (!cmd || *cmd == '\0') continue;
+
+        // --- Command Handling ---
         if (stricmp(cmd, "help") == 0) cmd_help();
         else if (stricmp(cmd, "clear") == 0) clear_screen();
         else if (stricmp(cmd, "formatfs") == 0) cmd_formatfs(ahci_base, port);
         else if (stricmp(cmd, "mount") == 0) {
-            if (fat32_init(ahci_base, port)) { fat32_initialized = true; cout << "FAT32 mounted.\n"; }
-            else { cout << "Failed to mount. Is disk formatted?\n"; }
+            if (fat32_init(ahci_base, port)) { 
+                fat32_initialized = true; 
+                cout << "FAT32 mounted.\n"; 
+            } else { 
+                cout << "Failed to mount. Is disk formatted?\n"; 
+            }
         }
-        else if (stricmp(cmd, "unmount") == 0) { fat32_initialized = false; cout << "Filesystem unmounted.\n"; }
+        else if (stricmp(cmd, "unmount") == 0) { 
+            fat32_initialized = false; 
+            cout << "Filesystem unmounted.\n"; 
+        }
         else {
             if (!fat32_initialized) {
                  cout << "Filesystem not mounted. Use 'mount' first.\n";
             } else {
                 if (stricmp(cmd, "ls") == 0) fat32_list_files(ahci_base, port);
-                else if (stricmp(cmd, "rm") == 0) { if(args) fat32_remove_file(ahci_base, port, args); else cout << "Usage: rm <filename>\n"; }
-                else if (stricmp(cmd, "touch") == 0) { if(args) fat32_add_file(ahci_base, port, args, "", 0); else cout << "Usage: touch <filename>\n"; }
-                else if (stricmp(cmd, "notepad") == 0) cmd_notepad(ahci_base, port, args);
-                else if (stricmp(cmd, "") != 0) { cout << "Unknown command: '" << cmd << "'\n"; }
+                else if (stricmp(cmd, "rm") == 0) { 
+                    if(arg1) fat32_remove_file(ahci_base, port, arg1); 
+                    else cout << "Usage: rm <filename>\n"; 
+                }
+                else if (stricmp(cmd, "chkdsk") == 0) {
+                  cmd_chkdsk(ahci_base, port);
+                }
+                else if (stricmp(cmd, "touch") == 0) { 
+                    if(arg1) fat32_add_file(ahci_base, port, arg1, "", 0); 
+                    else cout << "Usage: touch <filename>\n"; 
+                }
+                else if (stricmp(cmd, "notepad") == 0) { 
+                    if(arg1) cmd_notepad(ahci_base, port, arg1); 
+                    else cout << "Usage: notepad <filename>\n";
+                }
+                else if (stricmp(cmd, "mv") == 0) { // RENAME command
+                    if(arg1 && arg2) {
+                        if (fat32_rename_file(ahci_base, port, arg1, arg2) == 0) cout << "File renamed.\n";
+                        else cout << "Error renaming file.\n";
+                    } else cout << "Usage: mv <old_name> <new_name>\n";
+                }
+                else if (stricmp(cmd, "cp") == 0) { // COPY command
+                    if(arg1 && arg2) {
+                        if (fat32_copy_file(ahci_base, port, arg1, arg2) == 0) cout << "File copied.\n";
+                        else cout << "Error copying file.\n";
+                    } else cout << "Usage: cp <source> <destination>\n";
+                }
+                else { cout << "Unknown command: '" << cmd << "'\n"; }
             }
         }
     }
 }
+
 
 // --- KERNEL ENTRY POINT ---
 extern "C" void kernel_main() {

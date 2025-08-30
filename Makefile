@@ -9,7 +9,7 @@ MAIN := main.iso
 $(MAIN):
 	as -32 boot.S -o boot.o
 
-	gcc -c kernel.cpp -ffreestanding -m32 -o kernel.o 
+	gcc -c kernel.cpp -ffreestanding -fno-exceptions -m32 -o kernel.o 
 
 	gcc -c types.cpp -ffreestanding -m32 -o types.o 
 
