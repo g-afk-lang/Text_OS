@@ -5,7 +5,7 @@
 #include "interrupts.h"
 
 // --- NOTEPAD CONSTANTS ---
-#define MAX_LINES 10000
+#define MAX_LINES 100
 #define MAX_VISIBLE_LINES 20
 #define MAX_LINE_LENGTH 79
 #define NOTEPAD_START_ROW 3
