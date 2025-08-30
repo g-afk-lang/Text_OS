@@ -5,10 +5,11 @@
 #include "interrupts.h"
 
 // --- NOTEPAD CONSTANTS ---
-#define MAX_LINES 20
+#define MAX_LINES 100
+#define MAX_VISIBLE_LINES 20
 #define MAX_LINE_LENGTH 79
 #define NOTEPAD_START_ROW 3
-#define NOTEPAD_END_ROW (NOTEPAD_START_ROW + MAX_LINES - 1)
+#define NOTEPAD_END_ROW (NOTEPAD_START_ROW + MAX_VISIBLE_LINES - 1)
 
 // --- NOTEPAD STATE ---
 static bool notepad_running = false;
@@ -19,9 +20,12 @@ static int cursor_col = 0;
 static int current_line_count = 1;
 static char current_filename[32] = "";
 
+// Scrolling state
+static int scroll_offset = 0;
+static int visible_lines = MAX_VISIBLE_LINES;
+
 // --- MISSING FORWARD DECLARATIONS ---
 extern bool extended_key;
-
 extern int input_length;
 extern bool is_pong_running();
 extern uint64_t ahci_base;
@@ -117,6 +121,37 @@ static void int_to_string(int num, char* str) {
     }
 }
 
+// --- SCROLLING FUNCTIONS ---
+void notepad_scroll_up() {
+    if (scroll_offset > 0) {
+        scroll_offset--;
+        notepad_draw_interface();
+    }
+}
+
+void notepad_scroll_down() {
+    int max_scroll = current_line_count - visible_lines;
+    if (max_scroll < 0) max_scroll = 0;
+    
+    if (scroll_offset < max_scroll) {
+        scroll_offset++;
+        notepad_draw_interface();
+    }
+}
+
+void notepad_ensure_cursor_visible() {
+    // Scroll up if cursor is above visible area
+    if (cursor_row < scroll_offset) {
+        scroll_offset = cursor_row;
+        notepad_draw_interface();
+    }
+    // Scroll down if cursor is below visible area
+    else if (cursor_row >= scroll_offset + visible_lines) {
+        scroll_offset = cursor_row - visible_lines + 1;
+        notepad_draw_interface();
+    }
+}
+
 // --- NOTEPAD FUNCTIONS ---
 bool is_notepad_running() {
     return notepad_running;
@@ -129,6 +164,7 @@ void notepad_clear_buffer() {
     cursor_row = 0;
     cursor_col = 0;
     current_line_count = 1;
+    scroll_offset = 0;
 }
 
 void notepad_draw_interface() {
@@ -146,46 +182,81 @@ void notepad_draw_interface() {
         notepad_write_string_at(0, 16, "New File", 0x0F);
     }
     
+    // Show scroll position indicator
+    if (current_line_count > visible_lines) {
+        char scroll_info[32];
+        simple_strcpy(scroll_info, " Lines: ");
+        char line_num[8];
+        int_to_string(scroll_offset + 1, line_num);
+        simple_strcat(scroll_info, line_num);
+        simple_strcat(scroll_info, "-");
+        int_to_string(scroll_offset + visible_lines, line_num);
+        simple_strcat(scroll_info, line_num);
+        simple_strcat(scroll_info, "/");
+        int_to_string(current_line_count, line_num);
+        simple_strcat(scroll_info, line_num);
+        notepad_write_string_at(0, 50, scroll_info, 0x0F);
+    }
+    
     // Draw help line
-    notepad_write_string_at(1, 0, "ESC: Save & Exit | Arrow Keys: Move | Type to edit", 0x07);
+    notepad_write_string_at(1, 0, "ESC: Save & Exit | Arrows: Move | PgUp/PgDn: Scroll | Type to edit", 0x07);
     
     // Draw separator
     for (int i = 0; i < 80; i++) {
         notepad_write_char_at(2, i, '-', 0x07);
     }
     
-    // Draw line numbers and content
-    for (int i = 0; i < MAX_LINES; i++) {
-        // Line number
-        char line_num[4];
-        int_to_string(i + 1, line_num);
+    // Draw line numbers and content based on scroll offset
+    for (int i = 0; i < visible_lines; i++) {
+        int buffer_line = scroll_offset + i;
         
-        if (i < 9) {
-            notepad_write_char_at(NOTEPAD_START_ROW + i, 0, ' ', 0x08);
-            notepad_write_string_at(NOTEPAD_START_ROW + i, 1, line_num, 0x08);
+        if (buffer_line < current_line_count) {
+            // Line number (show actual line number, not screen line)
+            char line_num[4];
+            int_to_string(buffer_line + 1, line_num);
+            
+            if (buffer_line < 9) {
+                notepad_write_char_at(NOTEPAD_START_ROW + i, 0, ' ', 0x08);
+                notepad_write_string_at(NOTEPAD_START_ROW + i, 1, line_num, 0x08);
+            } else if (buffer_line < 99) {
+                notepad_write_string_at(NOTEPAD_START_ROW + i, 0, line_num, 0x08);
+            } else {
+                // For 3+ digit line numbers, just show the number
+                notepad_write_string_at(NOTEPAD_START_ROW + i, 0, line_num, 0x08);
+            }
+            notepad_write_char_at(NOTEPAD_START_ROW + i, 3, '|', 0x08);
+            
+            // Content
+            notepad_write_string_at(NOTEPAD_START_ROW + i, 4, notepad_buffer[buffer_line], 0x07);
         } else {
-            notepad_write_string_at(NOTEPAD_START_ROW + i, 0, line_num, 0x08);
+            // Empty line beyond content
+            notepad_write_string_at(NOTEPAD_START_ROW + i, 0, "   |", 0x08);
         }
-        notepad_write_char_at(NOTEPAD_START_ROW + i, 2, '|', 0x08);
-        
-        // Content
-        notepad_write_string_at(NOTEPAD_START_ROW + i, 3, notepad_buffer[i], 0x07);
     }
 }
 
 void notepad_update_cursor() {
-    // Position cursor at current editing position
-    notepad_set_cursor_position(NOTEPAD_START_ROW + cursor_row, 3 + cursor_col);
+    // Ensure cursor is visible
+    notepad_ensure_cursor_visible();
+    
+    // Position cursor at current editing position (relative to screen)
+    int screen_row = cursor_row - scroll_offset;
+    notepad_set_cursor_position(NOTEPAD_START_ROW + screen_row, 4 + cursor_col);
     notepad_show_cursor();
 }
 
 void notepad_redraw_current_line() {
-    // Clear the content area of the current line
-    for (int i = 3; i < 80; i++) {
-        notepad_write_char_at(NOTEPAD_START_ROW + cursor_row, i, ' ', 0x07);
+    int screen_row = cursor_row - scroll_offset;
+    
+    // Only redraw if the current line is visible
+    if (screen_row >= 0 && screen_row < visible_lines) {
+        // Clear the content area of the current line
+        for (int i = 4; i < 80; i++) {
+            notepad_write_char_at(NOTEPAD_START_ROW + screen_row, i, ' ', 0x07);
+        }
+        // Redraw the line content
+        notepad_write_string_at(NOTEPAD_START_ROW + screen_row, 4, notepad_buffer[cursor_row], 0x07);
     }
-    // Redraw the line content
-    notepad_write_string_at(NOTEPAD_START_ROW + cursor_row, 3, notepad_buffer[cursor_row], 0x07);
 }
 
 void notepad_insert_char(char c) {
@@ -267,7 +338,7 @@ void notepad_delete_char() {
 }
 
 void notepad_new_line() {
-    if (cursor_row >= MAX_LINES - 1) return; // Can't add more lines
+    if (current_line_count >= MAX_LINES) return; // Can't add more lines
     
     char* curr_line = notepad_buffer[cursor_row];
     int line_len = simple_strlen(curr_line);
@@ -296,10 +367,7 @@ void notepad_new_line() {
     
     cursor_row++;
     cursor_col = 0;
-    
-    if (current_line_count < MAX_LINES) {
-        current_line_count++;
-    }
+    current_line_count++;
     
     // Redraw screen
     notepad_draw_interface();
@@ -323,9 +391,10 @@ void notepad_move_cursor(int delta_row, int delta_col) {
     cursor_row = new_row;
     cursor_col = new_col;
 }
+
 void notepad_save_and_exit(const char* filename_arg) {
     char final_filename[256];
-
+    
     // 1. Prioritize the filename passed to this function (if any).
     if (filename_arg && filename_arg[0] != '\0') {
         simple_strcpy(final_filename, filename_arg);
@@ -338,8 +407,6 @@ void notepad_save_and_exit(const char* filename_arg) {
     else {
         simple_strcpy(final_filename, "untitled.txt");
     }
-
-    // --- The rest of the function remains the same ---
     
     // Convert buffer to a single string for saving
     char save_buffer[MAX_LINES * (MAX_LINE_LENGTH + 1) + 1];
@@ -365,7 +432,6 @@ void notepad_save_and_exit(const char* filename_arg) {
     
     notepad_running = false;
 }
-
 
 void notepad_load_file(const char* filename) {
     char load_buffer[MAX_LINES * (MAX_LINE_LENGTH + 1) + 1];
@@ -451,6 +517,15 @@ void notepad_handle_special_key(int scancode) {
             cursor_col = simple_strlen(notepad_buffer[cursor_row]);
             break;
             
+        // Scroll keys
+        case 0x49: // Page Up
+            notepad_scroll_up();
+            break;
+            
+        case 0x51: // Page Down
+            notepad_scroll_down();
+            break;
+            
         case 0x01: // ESC
             notepad_save_and_exit(notepad_filename);
             return;
@@ -476,5 +551,5 @@ void start_notepad(const char* filename) {
 void cmd_notepad(const char* filename) {
     simple_strcpy(notepad_filename, filename);
     start_notepad(filename);
-
 }
+
