@@ -11,6 +11,7 @@
 #include "disk.h"
 #include "dma_memory.h"
 #include "identify.h"
+#include "notepad.h"
 
 
 
@@ -853,16 +854,9 @@ void command_prompt() {
                 else if (stricmp(cmd, "chkdsk") == 0) {
                   cmd_chkdsk(ahci_base, port);
                 }
-                else if (stricmp(cmd, "write") == 0) { 
-                    char document[256];
-                    cin >> document ;
-                    if (fat32_write_file(ahci_base, port, arg1, document, sizeof(document)) == 0) {
-                        cout << "File '" << arg1 << "' written.\n";
-                    } else {
-                        cout << "Error writing file.\n";
-                    }
-                    
-                    }
+                else if (stricmp(cmd, "notepad") == 0) {
+                    cmd_notepad(arg1);  // arg1 can be nullptr for new file
+                }
                 else if (stricmp(cmd, "cat") == 0) {
                     cmd_cat(ahci_base, port, arg1);
                 }

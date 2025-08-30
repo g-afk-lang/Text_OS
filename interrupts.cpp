@@ -2,6 +2,7 @@
 #include "terminal_hooks.h"
 #include "iostream_wrapper.h"
 #include "test.h"
+#include "notepad.h"
 
 // IDT and GDT structures
 struct idt_entry idt[256];
@@ -12,7 +13,6 @@ struct gdt_ptr gdtp;
 // --- KEYBOARD STATE ---
 static bool shift_pressed = false;
 
-
 // --- SCANCODE CONSTANTS ---
 #define SCANCODE_L_SHIFT_PRESS 0x2A
 #define SCANCODE_R_SHIFT_PRESS 0x36
@@ -20,17 +20,13 @@ static bool shift_pressed = false;
 #define SCANCODE_R_SHIFT_RELEASE 0xB6
 #define SCANCODE_UP 0x48
 #define SCANCODE_DOWN 0x50
-#define SCANCODE_LEFT 0x4B      // ADD MISSING
-#define SCANCODE_RIGHT 0x4D     // ADD MISSING
-#define SCANCODE_HOME 0x47      // ADD MISSING
-#define SCANCODE_END 0x4F       // ADD MISSING
+#define SCANCODE_LEFT 0x4B      
+#define SCANCODE_RIGHT 0x4D     
+#define SCANCODE_HOME 0x47      
+#define SCANCODE_END 0x4F       
 #define SCANCODE_F5_PRESS 0x3F
-#define SCANCODE_ESC 0x01       // ADD MISSING
+#define SCANCODE_ESC 0x01       
 #define KEY_F5 -5
-
-// ADD MISSING FORWARD DECLARATIONS
-
-extern void notepad_handle_input(char key);
 
 // Keyboard scancode tables
 const char scancode_to_ascii[128] = {
@@ -71,9 +67,21 @@ extern "C" void keyboard_handler() {
         return;
     }
     
+    // Handle ESC key specially for notepad
+    if (scancode == SCANCODE_ESC) {
+        if (is_notepad_running()) {
+            notepad_handle_special_key(scancode);
+        }
+        extended_key = false;
+        outb(0x20, 0x20);
+        return;
+    }
+    
     // Handle F5 key press to start Pong
     if (scancode == SCANCODE_F5_PRESS) {
-        start_pong_game();
+        if (!is_notepad_running()) { // Don't start Pong if notepad is running
+            start_pong_game();
+        }
         outb(0x20, 0x20);
         return;
     }
@@ -100,7 +108,9 @@ extern "C" void keyboard_handler() {
     
     // Handle extended keys (arrow keys, etc.)
     if (extended_key) {
-        if (is_pong_running()) {
+        if (is_notepad_running()) {
+            notepad_handle_special_key(scancode);
+        } else if (is_pong_running()) {
             switch (scancode) {
                 case SCANCODE_UP:
                     pong_handle_input('w'); // Map up arrow to W
@@ -124,14 +134,14 @@ extern "C" void keyboard_handler() {
         return;
     }
     
-  
-    
     // Normal input handling
     const char* current_scancode_table = shift_pressed ? scancode_to_ascii_shifted : scancode_to_ascii;
     char key = current_scancode_table[scancode];
     
     if (key != 0) {
-         if (is_pong_running()) {
+        if (is_notepad_running()) {
+            notepad_handle_input(key);
+        } else if (is_pong_running()) {
             pong_handle_input(key);
         } else {
             // Normal terminal input handling
@@ -160,11 +170,11 @@ extern "C" void timer_handler() {
     // Update Pong game if it's running
     if (is_pong_running()) {
         pong_update();
-    } else if (!is_pong_running()) {
+    } else if (!is_pong_running() && !is_notepad_running()) {
         // Only blink cursor when not in game AND not in notepad
         update_cursor_state();
     }
-    // Don't update cursor when notepad is running to prevent blink glitch
+    // Don't update cursor when notepad or pong is running to prevent blink glitch
     
     // Send EOI to PIC
     outb(0x20, 0x20);
@@ -294,4 +304,3 @@ void init_keyboard() {
     /* Enable interrupts */
     asm volatile ("sti");
 }
-

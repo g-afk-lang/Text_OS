@@ -39,8 +39,10 @@ $(MAIN):
 	gcc -c io_port.cpp -ffreestanding -m32 -o io_port.o 
 	
 	gcc -c dma_memory.cpp -ffreestanding -m32 -o dma_memory.o 
+	
+	gcc -c notepad.cpp -ffreestanding -m32 -o notepad.o 
 
-	gcc -ffreestanding -m32 -nostdlib -o '$(MULTIBOOT)' -T linker.ld boot.o kernel.o string.o types.o terminal_io.o terminal_hooks.o stdlib_hooks.o iostream_wrapper.o interrupts.o test.o test2.o hardware_specs.o io_port.o pci.o dma_memory.o -lgcc
+	gcc -ffreestanding -m32 -nostdlib -o '$(MULTIBOOT)' -T linker.ld boot.o kernel.o string.o types.o terminal_io.o terminal_hooks.o stdlib_hooks.o iostream_wrapper.o interrupts.o test.o test2.o hardware_specs.o io_port.o pci.o dma_memory.o notepad.o -lgcc
 
 	grub-mkrescue -o '$@' '$(ISODIR)'
 
