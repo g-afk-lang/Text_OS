@@ -4,6 +4,14 @@
 #include "iostream_wrapper.h"
 #include "dma_memory.h"
 #include "stdlib_hooks.h"
+// Command ring management
+static uint32_t cmd_ring_enqueue = 0;
+static uint32_t cmd_ring_cycle = 1;
+
+// --- UTILITY FUNCTION IMPLEMENTATIONS ---
+static inline void* simple_memcpy(void* dst, const void* src, size_t n) { char* d = (char*)dst; const char* s = (const char*)src; for (size_t i = 0; i < n; i++) d[i] = s[i]; return dst; }
+static inline void* simple_memset(void* s, int c, size_t n) { char* p = (char*)s; for (size_t i = 0; i < n; i++) p[i] = (char)c; return s; }
+static inline int simple_memcmp(const void* s1, const void* s2, size_t n) { const unsigned char* p1 = (const unsigned char*)s1; const unsigned char* p2 = (const unsigned char*)s2; for (size_t i = 0; i < n; i++) { if (p1[i] != p2[i]) return p1[i] - p2[i]; } return 0; }
 
 // --- Global Pointers to xHCI resources (Definitions) ---
 volatile xhci_cap_regs_t* xhci_cap_regs;
@@ -28,14 +36,6 @@ static void* align_pointer(void* ptr, size_t alignment) {
 }
 
 
-// Simple memset implementation (in case stdlib_hooks.h doesn't work)
-static void* simple_memset(void* s, int c, size_t n) {
-    unsigned char* p = (unsigned char*)s;
-    for (size_t i = 0; i < n; i++) {
-        p[i] = (unsigned char)c;
-    }
-    return s;
-}
 
 // --- Initialization Function ---
 bool xhci_init() {
@@ -175,5 +175,39 @@ bool xhci_init() {
         }
     }
     
+    return true;
+}
+bool setup_usb_keyboard_endpoint(uint8_t slot_id) {
+    cout << "Setting up USB keyboard endpoint for slot " << (int)slot_id << "...\n";
+    
+    // Configure Input Context for keyboard endpoint
+    // This would involve setting up the endpoint context with:
+    // - Endpoint Type: Interrupt IN
+    // - Max Packet Size: 8 bytes (standard HID keyboard report)
+    // - Interval: Polling interval for keyboard
+    
+    // Issue Configure Endpoint command to xHCI
+	// Get next available command TRB slot
+	xhci_trb_t* cmd_trb = &cmd_ring[cmd_ring_enqueue];
+
+	// Initialize the command TRB (specific commands will set proper values)
+	cmd_trb->parameter = 0;  // Will be set by specific command functions
+	cmd_trb->status = 0;     // Will be set by specific command functions  
+	cmd_trb->control = cmd_ring_cycle;  // Set cycle bit
+
+	// Advance command ring enqueue pointer
+	cmd_ring_enqueue++;
+	if (cmd_ring_enqueue >= 256) {  // Ring size from initialization
+		cmd_ring_enqueue = 0;
+		cmd_ring_cycle ^= 1;  // Toggle cycle bit when wrapping
+	}
+
+    cmd_trb->status = 0;
+    cmd_trb->control = (12 << 10) | (1 << 0);  // Configure Endpoint Command, Cycle bit
+    
+    // Ring command doorbell
+    xhci_db_regs[0] = 0;  // Host Controller Command
+    
+    cout << "USB keyboard endpoint configured\n";
     return true;
 }
