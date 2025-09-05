@@ -16,6 +16,12 @@
 
 
 
+// Forward declaration for the new function
+void reinit_keyboard_after_usb();
+
+// ... [Keep all your existing code unchanged until kernel_main()] ...
+
+
 void cmd_notepad(unsigned long long, int, char const*);
 
 
@@ -885,16 +891,28 @@ void command_prompt() {
 
 // --- KERNEL ENTRY POINT ---
 extern "C" void kernel_main() {
-    terminal_initialize(); init_terminal_io(); init_keyboard();
+    terminal_initialize(); 
+    init_terminal_io(); 
+    init_keyboard();
     cout << "Kernel Initialized.\n";
+    
     uint64_t dma_base = 0xFED00000;
-    if (dma_manager.initialize(dma_base)) { cout << "DMA Manager Initialized.\n"; }
+    if (dma_manager.initialize(dma_base)) { 
+        cout << "DMA Manager Initialized.\n"; 
+    }
+    
     cout << "FAT32 Filesystem Support Ready.\n\n";
-	if (xhci_init()) {
-    cout << "USB Subsystem is online.\n";
-	} else {
-		cout << "USB Subsystem failed to start.\n";
-	}
+    
+    // Initialize USB subsystem
+    if (xhci_init()) {
+        cout << "USB Subsystem is online.\n";
+        // CRITICAL: Re-initialize keyboard after USB setup to prevent conflicts
+        cout << "Re-initializing PS/2 keyboard after USB setup...\n";
+        reinit_keyboard_after_usb();
+        cout << "Keyboard re-initialization complete.\n";
+    } else {
+        cout << "USB Subsystem failed to start.\n";
+    }
+    
     command_prompt();
 }
-

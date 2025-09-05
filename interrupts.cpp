@@ -253,24 +253,36 @@ asm(
     " iret\n" // Return from interrupt
 );
 
-/* Initialize PIC */
+/* Initialize PIC - Enhanced version for USB compatibility */
 void init_pic() {
+    // Save current interrupt masks
+    uint8_t master_mask = inb(0x21);
+    uint8_t slave_mask = inb(0xA1);
+    
     /* ICW1: Start initialization sequence */
     outb(0x20, 0x11); /* Master PIC */
     outb(0xA0, 0x11); /* Slave PIC */
+    
     /* ICW2: Define PIC vectors */
     outb(0x21, 0x20); /* Master PIC vector offset (IRQ0 = int 0x20) */
     outb(0xA1, 0x28); /* Slave PIC vector offset (IRQ8 = int 0x28) */
+    
     /* ICW3: Tell Master PIC that there is a slave PIC at IRQ2 */
     outb(0x21, 0x04);
     /* ICW3: Tell Slave PIC its cascade identity */
     outb(0xA1, 0x02);
+    
     /* ICW4: Set x86 mode */
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    /* Mask all interrupts except keyboard (IRQ1) and timer (IRQ0) */
-    outb(0x21, 0xFC); /* 1111 1100 = all but IRQ0 and IRQ1 masked */
-    outb(0xA1, 0xFF); /* Mask all slave interrupts */
+    
+    /* Restore interrupt masks but ensure keyboard (IRQ1) and timer (IRQ0) are enabled */
+    /* Also ensure USB interrupts (typically IRQ11, 10, or 9) remain enabled */
+    master_mask &= ~0x03; // Enable IRQ0 (timer) and IRQ1 (keyboard)
+    slave_mask &= ~0x0E;  // Enable IRQ9, IRQ10, IRQ11 for USB devices
+    
+    outb(0x21, master_mask);
+    outb(0xA1, slave_mask);
 }
 
 /* Initialize PIT (Programmable Interval Timer) for cursor blinking */
@@ -283,24 +295,62 @@ void init_pit() {
     outb(0x40, (divisor >> 8) & 0xFF);
 }
 
-/* Initialize keyboard */
+/* Re-initialize keyboard after USB setup */
+void reinit_keyboard_after_usb() {
+    // Clear keyboard buffer
+    while (inb(0x64) & 0x01) {
+        inb(0x60);
+    }
+    
+    // Send keyboard enable command
+    while (inb(0x64) & 0x02); // Wait for input buffer to be clear
+    outb(0x60, 0xF4); // Enable keyboard command
+    
+    // Wait for ACK
+    while (!(inb(0x64) & 0x01));
+    uint8_t response = inb(0x60);
+    if (response != 0xFA) {
+        // Keyboard didn't acknowledge, try reset
+        while (inb(0x64) & 0x02);
+        outb(0x60, 0xFF); // Reset keyboard
+        while (!(inb(0x64) & 0x01));
+        inb(0x60); // Read response
+    }
+    
+    // Re-enable keyboard interrupt
+    init_pic();
+}
+
+/* Initialize keyboard - Enhanced version */
 void init_keyboard() {
     /* First, set up GDT */
     init_gdt();
+    
     /* Initialize IDT */
     for (int i = 0; i < 256; i++) {
         idt_set_gate(i, 0, 0, 0);
     }
+    
     /* Set timer interrupt gate (IRQ0) */
     idt_set_gate(0x20, reinterpret_cast<uint32_t>(timer_handler_wrapper), 0x08, 0x8E);
+    
     /* Set keyboard interrupt gate (IRQ1) */
     idt_set_gate(0x21, reinterpret_cast<uint32_t>(keyboard_handler_wrapper), 0x08, 0x8E);
+    
     /* Load IDT */
     idt_load();
+    
     /* Initialize PIC */
     init_pic();
+    
     /* Initialize PIT */
     init_pit();
+    
+    /* Clear any pending keyboard data */
+    while (inb(0x64) & 0x01) {
+        inb(0x60);
+    }
+    
     /* Enable interrupts */
     asm volatile ("sti");
 }

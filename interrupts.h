@@ -22,6 +22,9 @@ void idt_load();
 void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags);
 void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran);
 
+// USB compatibility functions
+void reinit_keyboard_after_usb();
+
 // Interrupt handler declarations
 extern "C" {
     void keyboard_handler_wrapper();
