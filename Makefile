@@ -13,7 +13,6 @@ $(MAIN):
 
 	gcc -c types.cpp -ffreestanding -m32 -o types.o 
 
-
 	gcc -c terminal_io.cpp -ffreestanding -m32 -o terminal_io.o 
 
 	gcc -c terminal_hooks.cpp -ffreestanding -m32 -o terminal_hooks.o 
@@ -24,13 +23,11 @@ $(MAIN):
 
 	gcc -c interrupts.cpp -ffreestanding -m32 -o interrupts.o 
 
-
 	gcc -c string.cpp -ffreestanding -m32 -o string.o 
 
 	gcc -c test.cpp -ffreestanding -m32 -o test.o 
 
 	gcc -c test2.cpp -ffreestanding -m32 -o test2.o 
-
 
 	gcc -c hardware_specs.cpp -ffreestanding -m32 -o hardware_specs.o 
 
@@ -41,8 +38,10 @@ $(MAIN):
 	gcc -c dma_memory.cpp -ffreestanding -m32 -o dma_memory.o 
 	
 	gcc -c notepad.cpp -ffreestanding -m32 -o notepad.o 
+	
+	gcc -c xhci.cpp -ffreestanding -m32 -o xhci.o 
 
-	gcc -ffreestanding -m32 -nostdlib -o '$(MULTIBOOT)' -T linker.ld boot.o kernel.o string.o types.o terminal_io.o terminal_hooks.o stdlib_hooks.o iostream_wrapper.o interrupts.o test.o test2.o hardware_specs.o io_port.o pci.o dma_memory.o notepad.o -lgcc
+	gcc -ffreestanding -m32 -nostdlib -o '$(MULTIBOOT)' -T linker.ld boot.o kernel.o string.o types.o terminal_io.o terminal_hooks.o stdlib_hooks.o iostream_wrapper.o interrupts.o test.o test2.o hardware_specs.o io_port.o pci.o dma_memory.o notepad.o xhci.o -lgcc
 
 	grub-mkrescue -o '$@' '$(ISODIR)'
 

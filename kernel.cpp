@@ -12,6 +12,7 @@
 #include "dma_memory.h"
 #include "identify.h"
 #include "notepad.h"
+#include "xhci.h"
 
 
 
@@ -889,6 +890,11 @@ extern "C" void kernel_main() {
     uint64_t dma_base = 0xFED00000;
     if (dma_manager.initialize(dma_base)) { cout << "DMA Manager Initialized.\n"; }
     cout << "FAT32 Filesystem Support Ready.\n\n";
+	if (xhci_init()) {
+    cout << "USB Subsystem is online.\n";
+	} else {
+		cout << "USB Subsystem failed to start.\n";
+	}
     command_prompt();
 }
 
