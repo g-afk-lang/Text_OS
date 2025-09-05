@@ -2,10 +2,6 @@
 #define XHCI_H
 
 #include "types.h"
-// Add these declarations before the #endif
-void activate_usb_keyboard();
-void enable_usb_keyboard_override();
-void disable_ps2_keyboard();
 
 // --- xHCI Register Structures ---
 // Vol 1, Sec 5.3: Capability Registers

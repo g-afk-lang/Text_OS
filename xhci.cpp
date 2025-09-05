@@ -163,25 +163,17 @@ bool xhci_init() {
     
     cout << "xHCI driver initialized successfully.\n";
 
-    
     // 9. Enumerate ports
     uint8_t num_ports = (xhci_cap_regs->hcs_params1 >> 24) & 0xFF;
     cout << "Number of USB ports: " << (int)num_ports << "\n";
     xhci_port_regs = (xhci_port_regs_t*)((uintptr_t)xhci_op_regs + 0x400);
-    
-    bool has_connected_devices = false;
+
     for (uint8_t i = 0; i < num_ports; ++i) {
         volatile xhci_port_regs_t* port = &xhci_port_regs[i];
         if (port->portsc & 0x1) { // Check CCS (Current Connect Status) bit
             cout << "Device connected on Port " << (int)(i + 1) << "\n";
-            has_connected_devices = true;
         }
     }
     
-    // If we have connected USB devices, activate USB keyboard override
-    if (has_connected_devices) {
-        //enable_usb_keyboard_override();
-    }
-
     return true;
 }
