@@ -180,7 +180,7 @@ bool xhci_init() {
     
     // If we have connected USB devices, activate USB keyboard override
     if (has_connected_devices) {
-        enable_usb_keyboard_override();
+        //enable_usb_keyboard_override();
     }
 
     return true;
