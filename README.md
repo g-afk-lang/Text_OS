@@ -11,3 +11,6 @@ Recommended: format desired drive as fat32 first then dd the drive.
 sudo dd if=/home/user/Desktop/Text_OS-main/main.iso of=/dev/sdX (replace X with your sata drive, the OS is programmed to select port 0 for all operations)
 
 
+TODO: setup USB keyboard interrupt override to continue with kernel init. (else use older versions)
+
+
