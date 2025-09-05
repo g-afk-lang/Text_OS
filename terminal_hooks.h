@@ -24,11 +24,11 @@ void update_hardware_cursor(int x, int y);
 void enable_hardware_cursor(uint8_t cursor_start, uint8_t cursor_end);
 void disable_hardware_cursor();
 void clear_screen();
+void draw_header();
 void terminal_initialize();
 void terminal_setcolor(uint8_t color);
 void terminal_putentryat(char c, uint8_t color, size_t x, size_t y);
 void terminal_putchar(char c);
-void terminal_writestring(const char* data);
 void update_cursor_state();
 void scroll_screen();
 
@@ -46,5 +46,16 @@ inline uint8_t inb(uint16_t port) {
 inline void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
+
+
+// --- PUBLIC TERMINAL FUNCTION DECLARATIONS ---
+
+void terminal_writestring(const char* data);
+void terminal_clear_screen();
+
+// Redraws the main terminal header or prompt.
+void terminal_draw_header();
+
+
 
 #endif // TERMINAL_HOOKS_H

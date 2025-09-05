@@ -27,29 +27,27 @@ uint16_t make_vgaentry(char c, uint8_t color) {
 
 void update_hardware_cursor(int x, int y) {
     uint16_t pos = y * VGA_WIDTH + x;
-
     // CRT Controller registers: cursor position (low and high bytes)
-    outb(0x3D4, 0x0F);  // Low byte index
-    outb(0x3D5, static_cast<uint8_t>(pos & 0xFF));  // Low byte data
-    outb(0x3D4, 0x0E);  // High byte index
-    outb(0x3D5, static_cast<uint8_t>((pos >> 8) & 0xFF));  // High byte data
+    outb(0x3D4, 0x0F); // Low byte index
+    outb(0x3D5, static_cast<uint8_t>(pos & 0xFF)); // Low byte data
+    outb(0x3D4, 0x0E); // High byte index
+    outb(0x3D5, static_cast<uint8_t>((pos >> 8) & 0xFF)); // High byte data
 }
 
 void enable_hardware_cursor(uint8_t cursor_start, uint8_t cursor_end) {
     // CRT Controller registers: cursor shape
-    outb(0x3D4, 0x0A);  // Cursor start register
-    outb(0x3D5, (inb(0x3D5) & 0xC0) | cursor_start);  // Set start line (bits 0-4)
-
-    outb(0x3D4, 0x0B);  // Cursor end register
-    outb(0x3D5, (inb(0x3D5) & 0xE0) | cursor_end);  // Set end line (bits 0-4)
+    outb(0x3D4, 0x0A); // Cursor start register
+    outb(0x3D5, (inb(0x3D5) & 0xC0) | cursor_start); // Set start line (bits 0-4)
+    outb(0x3D4, 0x0B); // Cursor end register
+    outb(0x3D5, (inb(0x3D5) & 0xE0) | cursor_end); // Set end line (bits 0-4)
 }
 
 void disable_hardware_cursor() {
-    outb(0x3D4, 0x0A);  // Cursor start register
-    outb(0x3D5, 0x20);  // Bit 5 disables the cursor
+    outb(0x3D4, 0x0A); // Cursor start register
+    outb(0x3D5, 0x20); // Bit 5 disables the cursor
 }
 
-void clear_screen() {
+void terminal_clear_screen() {
     for (size_t y = 0; y < VGA_HEIGHT; y++) {
         for (size_t x = 0; x < VGA_WIDTH; x++) {
             const size_t index = y * VGA_WIDTH + x;
@@ -59,6 +57,18 @@ void clear_screen() {
     terminal_row = 0;
     terminal_column = 0;
     update_hardware_cursor(terminal_column, terminal_row);
+}
+
+void terminal_draw_header() {
+    // This is a simple implementation. You can customize it.
+    const char* prompt = "> ";
+    terminal_row = 0;
+    terminal_column = 0; 
+    for (int i = 0; prompt[i] != '\0'; i++) {
+        terminal_buffer[terminal_column] = make_vgaentry(prompt[i], 0x0F); // White on black
+        terminal_column++;
+    }
+    update_hardware_cursor(terminal_row, terminal_column);
 }
 
 void terminal_initialize() {
@@ -72,7 +82,6 @@ void terminal_initialize() {
             terminal_buffer[index] = make_vgaentry(' ', terminal_color);
         }
     }
-
     // Initialize hardware cursor (start line 14, end line 15 - typical underline cursor)
     enable_hardware_cursor(14, 15);
     update_hardware_cursor(0, 0);
@@ -96,7 +105,6 @@ void scroll_screen() {
             terminal_buffer[dest_index] = terminal_buffer[src_index];
         }
     }
-    
     // Clear the last row
     for (size_t x = 0; x < VGA_WIDTH; x++) {
         const size_t index = (VGA_HEIGHT - 1) * VGA_WIDTH + x;
@@ -139,7 +147,6 @@ void terminal_putchar(char c) {
             }
         }
     }
-
     // Update the hardware cursor position
     update_hardware_cursor(terminal_column, terminal_row);
 }
@@ -152,16 +159,14 @@ void terminal_writestring(const char* data) {
 
 void update_cursor_state() {
     cursor_blink_counter++;
-    if (cursor_blink_counter >= 25) {  // Adjust this value to control blink speed
+    if (cursor_blink_counter >= 25) { // Adjust this value to control blink speed
         cursor_blink_counter = 0;
         cursor_visible = !cursor_visible;
-
         if (cursor_visible) {
-            enable_hardware_cursor(14, 15);  // Show cursor (underline style)
+            enable_hardware_cursor(14, 15); // Show cursor (underline style)
         } else {
-            disable_hardware_cursor();  // Hide cursor
+            disable_hardware_cursor(); // Hide cursor
         }
-
-        update_hardware_cursor(terminal_column, terminal_row);
     }
+    update_hardware_cursor(terminal_column, terminal_row);
 }

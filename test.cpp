@@ -204,7 +204,7 @@ void pong_render() {
     draw_string_at(score_str, SCREEN_WIDTH / 2 + 8, 2);
     
     // Draw instructions and AI status
-    draw_string_at("Player 1: W/S to move  ESC to quit", 5, SCREEN_HEIGHT - 3);
+    draw_string_at("Player 1: W/S to move  q to quit", 5, SCREEN_HEIGHT - 3);
     
     // Show AI state for debugging (optional)
     if (ai_is_missing) {
@@ -233,18 +233,11 @@ void pong_handle_input(char key) {
                 player1.y += 1.0f;
             }
             break;
-        case 27: // ESC key
-            game_is_active = false;
-            clear_screen(); // Return to normal terminal
-            // Restore cursor
-            enable_hardware_cursor(14, 15);
-            update_hardware_cursor(0, 0);
-            break;
         case 'q':
         case 'Q':
             // Alternative quit key
             game_is_active = false;
-            clear_screen();
+            terminal_clear_screen();
             enable_hardware_cursor(14, 15);
             update_hardware_cursor(0, 0);
             break;

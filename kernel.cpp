@@ -825,7 +825,7 @@ void command_prompt() {
 
         // --- Command Handling ---
         if (stricmp(cmd, "help") == 0) cmd_help();
-        else if (stricmp(cmd, "clear") == 0) clear_screen();
+        else if (stricmp(cmd, "clear") == 0) terminal_clear_screen();
         else if (stricmp(cmd, "formatfs") == 0) cmd_formatfs(ahci_base, port);
         else if (stricmp(cmd, "mount") == 0) {
             if (fat32_init(ahci_base, port)) { 
